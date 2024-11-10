@@ -1,2 +1,7 @@
+# Игнорирование конфиденциальных данных
 .env
-.env
+config/keys/*
+config/secure/*
+config/*.json
+*.pem
+*.key
