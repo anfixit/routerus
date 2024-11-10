@@ -5,3 +5,13 @@ config/secure/*
 config/*.json
 *.pem
 *.key
+__pycache__/
+*.py[cod]
+.env
+*.yaml
+*.log
+.vscode/
+.idea/
+*.swp
+*.bak
+**/migrations/
