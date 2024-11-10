@@ -1,14 +1,16 @@
-import os
 from dotenv import load_dotenv
+import os
+from pathlib import Path
 
-# Load environment variables from .env file
 load_dotenv()
 
 # Base directory
-BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+BASE_DIR = Path(__file__).resolve().parent
 
 # Security
-SECRET_KEY = os.getenv('SECRET_KEY')
+SECRET_KEY = os.getenv('SECRET_KEY', 'your-default-secret-key-here')
+if not SECRET_KEY:
+    raise ValueError("SECRET_KEY environment variable is not set!")
 DEBUG = os.getenv('DEBUG', 'False') == 'True'
 ALLOWED_HOSTS = os.getenv('ALLOWED_HOSTS', '').split(',')
 
@@ -21,7 +23,9 @@ INSTALLED_APPS = [
     'django.contrib.messages',
     'django.contrib.staticfiles',
     'app',  # ваше приложение
-]
+    'vpn',  # новое приложение для VPN
+    'users', # новое приложение для управления пользователями
+    ]
 
 # Middleware
 MIDDLEWARE = [
@@ -41,7 +45,7 @@ ROOT_URLCONF = 'urls'
 TEMPLATES = [
     {
         'BACKEND': 'django.template.backends.django.DjangoTemplates',
-        'DIRS': [os.path.join(BASE_DIR, 'app', 'templates')],
+        'DIRS': [BASE_DIR / 'app' / 'templates'],
         'APP_DIRS': True,
         'OPTIONS': {
             'context_processors': [
@@ -69,7 +73,6 @@ DATABASES = {
     }
 }
 
-
 # Password validation
 AUTH_PASSWORD_VALIDATORS = [
     {
@@ -88,17 +91,17 @@ AUTH_PASSWORD_VALIDATORS = [
 
 # Static files (CSS, JavaScript, Images)
 STATIC_URL = '/static/'
-STATICFILES_DIRS = [os.path.join(BASE_DIR, 'app', 'static')]
+STATICFILES_DIRS = [BASE_DIR / 'app' / 'static']
 
 # Media files
 MEDIA_URL = '/media/'
-MEDIA_ROOT = os.path.join(BASE_DIR, 'media')
+MEDIA_ROOT = BASE_DIR / 'media'
 
 # Default primary key field type
 DEFAULT_AUTO_FIELD = 'django.db.models.BigAutoField'
 
 # Custom paths for configuration files
-CONFIG_DIR = os.path.join(BASE_DIR, 'config', 'development')
+CONFIG_DIR = BASE_DIR / 'config' / 'development'
 
 # WireGuard Config Paths
 WIREGUARD_CONFIG_PATH = os.getenv('WIREGUARD_CONFIG_PATH')
@@ -109,3 +112,18 @@ XRAY_CONFIG_PATH = os.getenv('XRAY_CONFIG_PATH')
 PRIVATE_KEY_PATH = os.getenv('PRIVATE_KEY_PATH')
 PUBLIC_KEY_PATH = os.getenv('PUBLIC_KEY_PATH')
 
+# Logging configuration
+LOGGING = {
+    'version': 1,
+    'disable_existing_loggers': False,
+    'handlers': {
+        'console': {
+            'level': 'DEBUG',
+            'class': 'logging.StreamHandler',
+        },
+    },
+    'root': {
+        'handlers': ['console'],
+        'level': 'WARNING',
+    },
+}

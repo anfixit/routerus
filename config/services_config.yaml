@@ -20,7 +20,7 @@ xray:
       port: ${XRAY_WIREGUARD_PORT}
       secretKey: ${XRAY_WIREGUARD_SECRET_KEY}
       publicKey: ${XRAY_WIREGUARD_PUBLIC_KEY}
-      address: [${XRAY_WIREGUARD_ADDRESS}]
+      address: "${XRAY_WIREGUARD_ADDRESS}"
       peers: []
       streamSettings:
         network: tcp
