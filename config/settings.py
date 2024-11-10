@@ -61,13 +61,14 @@ WSGI_APPLICATION = 'wsgi.application'
 DATABASES = {
     'default': {
         'ENGINE': 'django.db.backends.postgresql',
-        'NAME': 'wg_manager_db',
-        'USER': 'wg_user',
-        'PASSWORD': 'zamiralovesme8',
-        'HOST': '213.148.10.128',  # Или 'localhost', если подключаетесь локально
-        'PORT': '5432',
+        'NAME': os.getenv('DB_NAME'),
+        'USER': os.getenv('DB_USER'),
+        'PASSWORD': os.getenv('DB_PASSWORD'),
+        'HOST': os.getenv('DB_HOST', 'localhost'),  # По умолчанию будет 'localhost'
+        'PORT': os.getenv('DB_PORT', '5432'),       # По умолчанию будет 5432
     }
 }
+
 
 # Password validation
 AUTH_PASSWORD_VALIDATORS = [

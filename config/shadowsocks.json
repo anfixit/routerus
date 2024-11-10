@@ -1,0 +1,7 @@
+{
+  "server": "127.0.0.1",
+  "port": 1080,
+  "password": "$(cat /opt/wg-manager/secure/shadowsocks_pass.txt)",
+  "method": "chacha20-ietf-poly1305",
+  "timeout": 300
+}
