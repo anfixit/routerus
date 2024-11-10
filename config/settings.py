@@ -101,11 +101,11 @@ DEFAULT_AUTO_FIELD = 'django.db.models.BigAutoField'
 CONFIG_DIR = os.path.join(BASE_DIR, 'config', 'development')
 
 # WireGuard Config Paths
-WIREGUARD_CONFIG_PATH = os.path.join(CONFIG_DIR, 'wireguard.conf')
-SHADOWSOCKS_CONFIG_PATH = os.path.join(CONFIG_DIR, 'shadowsocks.json')
-XRAY_CONFIG_PATH = os.path.join(CONFIG_DIR, 'xray.json')
+WIREGUARD_CONFIG_PATH = os.getenv('WIREGUARD_CONFIG_PATH')
+SHADOWSOCKS_CONFIG_PATH = os.getenv('SHADOWSOCKS_CONFIG_PATH')
+XRAY_CONFIG_PATH = os.getenv('XRAY_CONFIG_PATH')
 
 # Keys paths
-KEYS_DIR = os.path.join(CONFIG_DIR, 'keys')
-PRIVATE_KEY_PATH = os.path.join(KEYS_DIR, 'private.key')
-PUBLIC_KEY_PATH = os.path.join(KEYS_DIR, 'public.key')
+PRIVATE_KEY_PATH = os.getenv('PRIVATE_KEY_PATH')
+PUBLIC_KEY_PATH = os.getenv('PUBLIC_KEY_PATH')
+

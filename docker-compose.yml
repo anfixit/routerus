@@ -1,0 +1,45 @@
+version: '3.8'
+
+services:
+  wireguard:
+    image: linuxserver/wireguard
+    container_name: wireguard
+    cap_add:
+      - NET_ADMIN
+      - SYS_MODULE
+    environment:
+      - PUID=1000
+      - PGID=1000
+      - TZ=${TZ}
+      - SERVERURL=${SERVER_URL}
+      - SERVERPORT=${SERVER_PORT}
+      - PEERS=${PEERS}
+      - PEERDNS=${PEERDNS}
+    volumes:
+      - ./config/wireguard:/config
+      - /lib/modules:/lib/modules
+    ports:
+      - "${SERVER_PORT}:${SERVER_PORT}/udp"
+    sysctls:
+      - net.ipv4.conf.all.src_valid_mark=1
+    restart: always
+
+  shadowsocks:
+    image: shadowsocks/shadowsocks-libev
+    container_name: shadowsocks
+    ports:
+      - "${SHADOWSOCKS_PORT}:${SHADOWSOCKS_PORT}"
+    environment:
+      - PASSWORD=${SHADOWSOCKS_PASSWORD}
+      - METHOD=${SHADOWSOCKS_METHOD}
+      - TIMEOUT=${SHADOWSOCKS_TIMEOUT}
+    restart: always
+
+  xray:
+    image: teddysun/xray
+    container_name: xray
+    ports:
+      - "${XRAY_PORT}:${XRAY_PORT}"
+    volumes:
+      - ./config/xray/config.json:/etc/xray/config.json
+    restart: always

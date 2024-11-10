@@ -1,9 +1,15 @@
 #!/usr/bin/env python
 import os
 import sys
+from app.utils import load_xray_config  # Добавим импорт функции
 
 if __name__ == "__main__":
     os.environ.setdefault("DJANGO_SETTINGS_MODULE", "config.settings")
+
+    # Загрузим конфигурацию Xray
+    xray_config = load_xray_config()
+    print("Загруженная конфигурация Xray:", xray_config)
+
     try:
         from django.core.management import execute_from_command_line
     except ImportError as exc:
