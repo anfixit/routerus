@@ -1,0 +1,30 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>WG Manager - Home</title>
+</head>
+<body>
+    <h1>Welcome to WireGuard Manager</h1>
+    <p>Сервер работает и готов к подключению клиентов.</p>
+
+    <h2>Состояние сервера:</h2>
+    <p>Скорость соединения: {{ server_speed }} Mbps</p>
+
+    <h2>Статистика клиентов:</h2>
+    <p>Всего активных клиентов: {{ active_clients }}</p>
+    <p>Новых клиентов за неделю: {{ clients_week }}</p>
+
+    <a href="{% url 'request_config' %}">Запросить создание конфигурации</a>
+
+    <h2>Полезные ссылки:</h2>
+    <ul>
+        <li><a href="https://github.com/your-repo">Проект на GitHub</a></li>
+        <li><a href="https://github.com/your-repo#readme">Документация</a></li>
+    </ul>
+
+    <h2>Новости и обновления:</h2>
+    <p>Здесь будут отображаться новости сервиса и планы на будущее.</p>
+</body>
+</html>
