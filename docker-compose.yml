@@ -12,14 +12,14 @@ services:
       - PGID=1000
       - TZ=${TZ}
       - SERVERURL=${SERVER_URL}
-      - SERVERPORT=${SERVER_PORT}
+      - SERVERPORT=${WIREGUARD_SERVER_PORT}  # Порт WireGuard
       - PEERS=${PEERS}
-      - PEERDNS=${PEERDNS}
+      - PEERDNS=${WIREGUARD_PEERDNS}
     volumes:
-      - ./config/wireguard:/config
+      - ./config/wireguard:/config        # Конфигурация WireGuard
       - /lib/modules:/lib/modules
     ports:
-      - "${SERVER_PORT}:${SERVER_PORT}/udp"
+      - "${WIREGUARD_SERVER_PORT}:${WIREGUARD_SERVER_PORT}/udp"
     sysctls:
       - net.ipv4.conf.all.src_valid_mark=1
     restart: always
@@ -28,7 +28,8 @@ services:
     image: shadowsocks/shadowsocks-libev
     container_name: shadowsocks
     ports:
-      - "${SHADOWSOCKS_PORT}:${SHADOWSOCKS_PORT}"
+      - "${SHADOWSOCKS_PORT}:${SHADOWSOCKS_PORT}/tcp"  # Поддержка TCP
+      - "${SHADOWSOCKS_PORT}:${SHADOWSOCKS_PORT}/udp"  # Поддержка UDP
     environment:
       - PASSWORD=${SHADOWSOCKS_PASSWORD}
       - METHOD=${SHADOWSOCKS_METHOD}
@@ -39,7 +40,12 @@ services:
     image: teddysun/xray
     container_name: xray
     ports:
-      - "${XRAY_PORT}:${XRAY_PORT}"
+      - "${XRAY_VLESS_PORT}:${XRAY_VLESS_PORT}/tcp"  # Поддержка VLESS
+      - "${XRAY_VLESS_PORT}:${XRAY_VLESS_PORT}/udp"
     volumes:
       - ./config/xray/config.json:/etc/xray/config.json
+    environment:
+      - UUID=${XRAY_UUID}
+      - NETWORK=${XRAY_VLESS_NETWORK}
+      - PATH=${XRAY_VLESS_PATH}
     restart: always

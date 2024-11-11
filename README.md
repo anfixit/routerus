@@ -55,3 +55,18 @@ Manage WireGuard, Shadowsocks, and Xray configurations via the web interface.
 The goal of the project is to create a convenient and secure tool for managing VPN configurations and bypassing internet censorship.
 
 The project is currently under development. Instructions for configuration and running the scripts will be added later.
+
+
+...
+
+## Changelog
+
+### Version 0.4.2
+- Настроены зависимости через Poetry
+- Обновлен `pyproject.toml` с основными зависимостями проекта
+- Подготовка структуры проекта для дальнейших версий
+
+## Версия 0.5.0
+- Добавлена генерация конфигураций для WireGuard, Shadowsocks и Xray.
+- Оптимизирована структура `docker-compose.yml` для использования переменных окружения.
+- Обновлены параметры для упрощенной развертки и управления VPN-сервисом.
