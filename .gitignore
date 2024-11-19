@@ -1,17 +1,33 @@
-# Игнорирование конфиденциальных данных
+# Конфиденциальные данные
 .env
-config/keys/*
-config/secure/*
+config/keys/
+config/secure/
 config/*.json
 *.pem
 *.key
-__pycache__/
+
+# Кеши и временные файлы
+config/__pycache__/
 *.py[cod]
-.env
-*.yaml
-*.log
-.vscode/
-.idea/
 *.swp
 *.bak
+*.log
+__pycache__/
+*.sqlite3  # Если вдруг тесты будут использовать SQLite
+
+# Игнорируем пользовательские настройки IDE и редакторов
+.vscode/
+.idea/
+
+# Файлы конфигурации
+*.yaml
+docker-compose.override.yml  # Локальные настройки для Docker
+
+# Миграции Django
 **/migrations/
+
+# Игнорируем конфигурации пользователей VPN
+config/wireguard/clients/
+
+# Docker файлы
+postgres_data/

@@ -1,51 +1,56 @@
 version: '3.8'
 
 services:
-  wireguard:
-    image: linuxserver/wireguard
-    container_name: wireguard
-    cap_add:
-      - NET_ADMIN
-      - SYS_MODULE
+  web:
+    build: .
+    ports:
+      - "8000:8000"
     environment:
-      - PUID=1000
-      - PGID=1000
-      - TZ=${TZ}
-      - SERVERURL=${SERVER_URL}
-      - SERVERPORT=${WIREGUARD_SERVER_PORT}  # Порт WireGuard
-      - PEERS=${PEERS}
-      - PEERDNS=${WIREGUARD_PEERDNS}
+      - DJANGO_SETTINGS_MODULE=config.settings.production
+      - DB_NAME=${DB_NAME}
+      - DB_USER=${DB_USER}
+      - DB_PASSWORD=${DB_PASSWORD}
+      - DB_HOST=${DB_HOST}
+      - DB_PORT=${DB_PORT}
+      - WG_DOMAIN=${WG_DOMAIN}
+      - SECRET_KEY_FILE=/run/secrets/secret_key
     volumes:
-      - ./config/wireguard:/config        # Конфигурация WireGuard
-      - /lib/modules:/lib/modules
-    ports:
-      - "${WIREGUARD_SERVER_PORT}:${WIREGUARD_SERVER_PORT}/udp"
-    sysctls:
-      - net.ipv4.conf.all.src_valid_mark=1
-    restart: always
+      - .:/app
+    depends_on:
+      - db
+    secrets:
+      - secret_key
+    networks:
+      - wg_network
+    dns:
+      - 8.8.8.8
 
-  shadowsocks:
-    image: shadowsocks/shadowsocks-libev
-    container_name: shadowsocks
-    ports:
-      - "${SHADOWSOCKS_PORT}:${SHADOWSOCKS_PORT}/tcp"  # Поддержка TCP
-      - "${SHADOWSOCKS_PORT}:${SHADOWSOCKS_PORT}/udp"  # Поддержка UDP
+  db:
+    image: postgres:15
     environment:
-      - PASSWORD=${SHADOWSOCKS_PASSWORD}
-      - METHOD=${SHADOWSOCKS_METHOD}
-      - TIMEOUT=${SHADOWSOCKS_TIMEOUT}
-    restart: always
+      POSTGRES_USER: ${DB_USER}
+      POSTGRES_PASSWORD: ${DB_PASSWORD}
+      POSTGRES_DB: ${DB_NAME}
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    networks:
+      - wg_network
 
   xray:
     image: teddysun/xray
-    container_name: xray
     ports:
-      - "${XRAY_VLESS_PORT}:${XRAY_VLESS_PORT}/tcp"  # Поддержка VLESS
-      - "${XRAY_VLESS_PORT}:${XRAY_VLESS_PORT}/udp"
+      - "443:443"
     volumes:
-      - ./config/xray/config.json:/etc/xray/config.json
-    environment:
-      - UUID=${XRAY_UUID}
-      - NETWORK=${XRAY_VLESS_NETWORK}
-      - PATH=${XRAY_VLESS_PATH}
-    restart: always
+      - ./config/xray:/etc/xray
+    networks:
+      - wg_network
+
+networks:
+  wg_network:
+
+volumes:
+  postgres_data:
+
+secrets:
+  secret_key:
+    file: ./secrets/secret_key

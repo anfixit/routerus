@@ -1,19 +1,44 @@
 import os
+import json
 from pathlib import Path
 from dotenv import load_dotenv
 
 # Загружаем переменные из .env
 load_dotenv()
 
-# Папки для конфигураций
-CONFIG_DIR = Path('./config')
+# Базовая директория
+BASE_DIR = Path(__file__).resolve().parent.parent
+CONFIG_DIR = BASE_DIR / 'config'
 WIREGUARD_CONFIG_DIR = CONFIG_DIR / 'wireguard'
 XRAY_CONFIG_DIR = CONFIG_DIR / 'xray'
 
-# Создаем необходимые папки, если их нет
-WIREGUARD_CONFIG_DIR.mkdir(parents=True, exist_ok=True)
-XRAY_CONFIG_DIR.mkdir(parents=True, exist_ok=True)
+# Создаем необходимые папки
+def create_directories():
+    required_dirs = [
+        CONFIG_DIR,
+        WIREGUARD_CONFIG_DIR,
+        XRAY_CONFIG_DIR,
+        WIREGUARD_CONFIG_DIR / 'clients'
+    ]
+    for directory in required_dirs:
+        if not directory.exists():
+            directory.mkdir(parents=True, exist_ok=True)
+            print(f"Created directory: {directory}")
 
+# Проверяем, что все переменные окружения установлены
+def check_environment_variables():
+    required_env_vars = [
+        'SECRET_KEY', 'DB_NAME', 'DB_USER', 'DB_PASSWORD', 'DB_HOST',
+        'WIREGUARD_PRIVATE_KEY', 'WIREGUARD_SERVER_PUBLIC_KEY',
+        'WIREGUARD_SERVER_IP', 'WIREGUARD_SERVER_PORT', 'WIREGUARD_PEERDNS',
+        'XRAY_UUID', 'XRAY_VLESS_PORT', 'XRAY_VLESS_PATH'
+    ]
+    missing_vars = [var for var in required_env_vars if not os.getenv(var)]
+    if missing_vars:
+        raise EnvironmentError(f"Missing required environment variables: {', '.join(missing_vars)}")
+    print("All required environment variables are set.")
+
+# Генерация конфигурации WireGuard
 def generate_wireguard_config():
     config_content = f"""
 [Interface]
@@ -29,7 +54,9 @@ PersistentKeepalive = {os.getenv("WIREGUARD_PERSISTENTKEEPALIVE")}
     """
     with open(WIREGUARD_CONFIG_DIR / 'wg0.conf', 'w') as f:
         f.write(config_content.strip())
+    print("WireGuard configuration generated.")
 
+# Генерация конфигурации Shadowsocks
 def generate_shadowsocks_config():
     config_content = {
         "server": os.getenv("SHADOWSOCKS_SERVER"),
@@ -40,7 +67,9 @@ def generate_shadowsocks_config():
     }
     with open(CONFIG_DIR / 'shadowsocks.json', 'w') as f:
         json.dump(config_content, f, indent=4)
+    print("Shadowsocks configuration generated.")
 
+# Генерация конфигурации Xray
 def generate_xray_config():
     config_content = {
         "log": {
@@ -54,17 +83,13 @@ def generate_xray_config():
                 "protocol": "vless",
                 "settings": {
                     "clients": [
-                        {
-                            "id": os.getenv("XRAY_UUID")
-                        }
+                        {"id": os.getenv("XRAY_UUID")}
                     ],
                     "decryption": "none"
                 },
                 "streamSettings": {
                     "network": os.getenv("XRAY_VLESS_NETWORK"),
-                    "wsSettings": {
-                        "path": os.getenv("XRAY_VLESS_PATH")
-                    }
+                    "wsSettings": {"path": os.getenv("XRAY_VLESS_PATH")}
                 }
             }
         ],
@@ -72,15 +97,17 @@ def generate_xray_config():
     }
     with open(XRAY_CONFIG_DIR / 'config.json', 'w') as f:
         json.dump(config_content, f, indent=4)
+    print("Xray configuration generated.")
 
+# Основная функция
 def main():
-    print("Generating WireGuard configuration...")
+    print("Setting up project...")
+    create_directories()
+    check_environment_variables()
     generate_wireguard_config()
-    print("Generating Shadowsocks configuration...")
     generate_shadowsocks_config()
-    print("Generating Xray configuration...")
     generate_xray_config()
-    print("Configuration files have been generated successfully.")
+    print("Setup complete. All configuration files are ready.")
 
 if __name__ == "__main__":
     main()

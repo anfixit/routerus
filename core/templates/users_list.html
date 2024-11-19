@@ -1,0 +1,34 @@
+{% extends 'base.html' %}
+
+{% block title %}
+Users List - WG Manager
+{% endblock %}
+
+{% block content %}
+<h2>Users List</h2>
+
+{% if users %}
+    <table>
+        <thead>
+            <tr>
+                <th>ID</th>
+                <th>Username</th>
+                <th>Email</th>
+            </tr>
+        </thead>
+        <tbody>
+            {% for user in users %}
+                <tr>
+                    <td>{{ user.id }}</td>
+                    <td>{{ user.username }}</td>
+                    <td>{{ user.email }}</td>
+                </tr>
+            {% endfor %}
+        </tbody>
+    </table>
+{% else %}
+    <p>No users found.</p>
+{% endif %}
+
+<a href="{% url 'create_user' %}">Create New User</a>
+{% endblock %}

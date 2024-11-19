@@ -1,11 +1,11 @@
-# manage.py
-
 #!/usr/bin/env python
 import os
 import sys
 
+# Установка пути к настройкам Django (указываем development или production в зависимости от окружения)
+os.environ.setdefault('DJANGO_SETTINGS_MODULE', 'config.settings.development')
+
 if __name__ == "__main__":
-    os.environ.setdefault("DJANGO_SETTINGS_MODULE", "config.settings.development")  # или production
     try:
         from django.core.management import execute_from_command_line
     except ImportError as exc:

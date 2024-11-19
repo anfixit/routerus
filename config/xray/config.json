@@ -1,0 +1,34 @@
+{
+    "log": {
+      "access": "/var/log/xray/access.log",
+      "error": "/var/log/xray/error.log",
+      "loglevel": "info"
+    },
+    "inbounds": [
+      {
+        "port": 443,
+        "protocol": "vless",
+        "settings": {
+          "clients": [
+            {
+              "id": "5db36724-4e3c-4669-8e6d-488d2815dd8a"
+            }
+          ],
+          "decryption": "none"
+        },
+        "streamSettings": {
+          "network": "ws",
+          "wsSettings": {
+            "path": "/vless"
+          }
+        }
+      }
+    ],
+    "outbounds": [
+      {
+        "protocol": "freedom",
+        "settings": {}
+      }
+    ]
+  }
+  
