@@ -52,46 +52,41 @@ The goal of the project is to create a convenient and secure tool for managing V
 
 ## Quick Start
 
-1. Clone the repository:
+1. **Clone the repository**:
    ```bash
    git clone https://github.com/Anfikus/wg-manager.git
-   ```
-2. Navigate into the project directory:
+
+2. **Navigate into the project directory**:
    ```bash
    cd wg-manager
-   ```
-3. Set up your environment:
+
+3. **Set up your environment**:
    ```bash
    python -m venv wg-manager-venv
    source wg-manager-venv/bin/activate
-   ```
-4. Install dependencies using Poetry:
+
+4. **Install dependencies using Poetry**:
    ```bash
    poetry install
-   ```
-5. Set environment variables:
-   Make sure to create a `.env` file or set your environment variables as follows:
-   ```env
+
+5. **Set environment variables: Make sure to create a .env file or set your environment variables as follows**:
+   ```bash
    DEBUG=True
    SECRET_KEY=<ваш_секретный_ключ>
    ALLOWED_HOSTS=*
    ...
-   ```
-6. Run database migrations:
+
+6. **Run database migrations**:
    ```bash
    python manage.py migrate
-   ```
-7. Run the application:
+
+7. **Run the application**:
    ```bash
    python manage.py runserver
-   ```
+
 
 ## Contributing
-
 Contributions are welcome! Please fork the repository and create a pull request for review.
 
----
-
 ## License
-
-MIT License. See `LICENSE` file for details.
+MIT License. See LICENSE file for details.
