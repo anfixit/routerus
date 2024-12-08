@@ -1,0 +1,14 @@
+<head>
+    <link rel="stylesheet" href="{% static 'style.css' %}">
+    </head>
+    
+{% extends 'base.html' %}
+
+{% block title %}Успех{% endblock %}
+
+{% block content %}
+<div class="text-center">
+    <h1>Операция выполнена успешно!</h1>
+    <p>Вы можете вернуться на <a href="{% url 'index' %}">главную страницу</a> или продолжить работу.</p>
+</div>
+{% endblock %}

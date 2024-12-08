@@ -1,0 +1,81 @@
+version: '3.8'
+
+services:
+  web:
+    container_name: web
+    restart: always
+    build:
+      context: .
+      dockerfile: ./docker/Dockerfile
+    command: python manage.py runserver 0.0.0.0:8000
+    ports:
+      - "8000:8000"
+    env_file:
+      - .env
+    depends_on:
+      - postgres
+      - shadowsocks
+      - xray
+    volumes:
+      - ./app:/app
+      - ./config:/config
+
+  postgres:
+    image: postgres:13
+    container_name: postgres
+    environment:
+      POSTGRES_DB: ${DB_NAME}
+      POSTGRES_USER: ${DB_USER}
+      POSTGRES_PASSWORD: ${DB_PASSWORD}
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    networks:
+      - wg-network
+
+  promtail:
+    image: grafana/promtail:latest
+    container_name: promtail
+    volumes:
+      - ./config/monitoring/promtail-config.yml:/etc/promtail/promtail-config.yml:ro
+      - /var/log:/var/log
+    command: -config.file=/etc/promtail/promtail-config.yml
+    networks:
+      - wg-network
+
+  shadowsocks:
+    image: shadowsocks/shadowsocks-libev
+    container_name: shadowsocks
+    ports:
+      - "8388:8388"
+    environment:
+      - SERVER_ADDR=${SS_SERVER_ADDR}
+      - SERVER_PORT=${SS_SERVER_PORT}
+      - PASSWORD=${SS_PASSWORD}
+      - METHOD=${SS_METHOD}
+      - TIMEOUT=${SS_TIMEOUT}
+    volumes:
+      - ./config/shadowsocks:/config:ro
+    networks:
+      - wg-network
+
+  xray:
+    image: teddysun/xray
+    container_name: xray
+    ports:
+      - "443:443"
+    environment:
+      - XRAY_VLESS_NETWORK=${XRAY_VLESS_NETWORK}
+      - XRAY_VLESS_PATH=${XRAY_VLESS_PATH}
+      - XRAY_UUID=${XRAY_UUID}
+      - XRAY_LOG_LEVEL=${XRAY_LOG_LEVEL}
+    volumes:
+      - ./config/xray:/config:ro
+    networks:
+      - wg-network
+
+volumes:
+  postgres_data:
+
+networks:
+  wg-network:
+    driver: bridge

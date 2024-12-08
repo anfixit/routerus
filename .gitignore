@@ -31,3 +31,15 @@ config/wireguard/clients/
 
 # Docker файлы
 postgres_data/
+
+# Временные файлы и директории
+/tmp/
+var/log/
+tmp/loki_logs/
+
+# Секреты Docker
+docker/secrets/
+
+# Логи Promtail и Loki
+/var/log/promtail/
+/var/log/loki/

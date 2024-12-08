@@ -1,10 +1,12 @@
-# production.py
-
 from .base import *
 
-# Параметры для продакшн
+# Debug mode disabled for production
 DEBUG = False
-ALLOWED_HOSTS = os.getenv('ALLOWED_HOSTS', 'wg.proanfi.ru').split(',')
+
+# Allowed hosts for production
+ALLOWED_HOSTS = os.getenv('ALLOWED_HOSTS', '').split(',')
+
+# Database configuration
 DATABASES = {
     'default': {
         'ENGINE': 'django.db.backends.postgresql',
@@ -12,13 +14,13 @@ DATABASES = {
         'USER': os.getenv('DB_USER'),
         'PASSWORD': os.getenv('DB_PASSWORD'),
         'HOST': os.getenv('DB_HOST'),
-        'PORT': os.getenv('DB_PORT'),
+        'PORT': os.getenv('DB_PORT', '5432'),
     }
 }
 
-# Дополнительные параметры безопасности для продакшн
-SECURE_BROWSER_XSS_FILTER = True
-SECURE_CONTENT_TYPE_NOSNIFF = True
-SESSION_COOKIE_SECURE = True
-CSRF_COOKIE_SECURE = True
-X_FRAME_OPTIONS = 'DENY'
+# Static files configuration
+STATIC_URL = '/static/'
+STATIC_ROOT = os.getenv('STATIC_ROOT', os.path.join(BASE_DIR, 'staticfiles'))
+
+# Logging for production
+LOGGING['handlers']['console']['level'] = 'INFO'

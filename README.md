@@ -1,92 +1,117 @@
-# WireGuard VPN Management System
 
-**Описание (Description)**
+# WireGuard Manager (wg-manager)
 
-Этот проект представляет собой систему управления VPN-сервером WireGuard с дополнительными механизмами маскировки и обфускации трафика для обхода блокировок. Система обеспечивает удобное управление VPN, маскирует трафик через Shadowsocks, а также использует Xray для обфускации на уровне HTTP/TLS.
+**WireGuard Manager** — это система управления VPN, которая интегрируется с Shadowsocks и Xray для обеспечения гибкой настройки и дополнительной обфускации.
 
-## Системные требования
-- Python 3.8+
-- Django 3.2+
-- Poetry 1.0+
-- Git
+## Возможности
+- Создание и управление конфигурациями WireGuard.
+- Интеграция с Shadowsocks для маскировки трафика.
+- Обфускация с использованием Xray (VLESS/WS/TLS).
+- Веб-интерфейс для управления пользователями и конфигурациями.
+- Логирование с использованием Loki и Promtail.
 
-## Основные компоненты проекта:
+## Установка
 
-- **WireGuard**: Основная VPN-сеть, обеспечивающая шифрование и безопасную передачу данных.
-- **Shadowsocks**: Сервис, добавляющий дополнительный слой маскировки для VPN-трафика, чтобы обойти ограничения и блокировки со стороны интернет-провайдеров.
-- **Xray**: Программа для обфускации трафика, делающая его похожим на обычный веб-трафик, что затрудняет обнаружение VPN-соединений. Использует протокол VLESS для маскировки трафика.
-- **Django**: Веб-фреймворк для управления VPN-конфигурациями через веб-интерфейс.
+### Предварительные требования
+- Python 3.12
+- Docker и Docker Compose
+- PostgreSQL
 
-## Основные функции проекта:
+### Шаги установки
+1. Клонируйте репозиторий:
+    ```
+    git clone https://github.com/Anfikus/wg-manager.git
+    cd wg-manager
+    ```
 
-- Добавление и удаление клиентов WireGuard через веб-интерфейс.
-- Возможность настройки обфускации трафика.
-- Управление конфигурациями WireGuard, Shadowsocks, и Xray через веб-интерфейс.
+2. Установите зависимости:
+    ```
+    poetry install
+    ```
 
-Цель проекта — создать удобный и безопасный инструмент для управления VPN-конфигурациями и обхода интернет-ограничений.
+3. Настройте `.env` файл:
+    Скопируйте пример:
+    ```
+    cp config/.env.example config/.env
+    ```
+    И заполните переменные окружения.
 
-**Проект находится в разработке. Инструкции по настройке и запуску скриптов будут добавлены позже.**
+4. Запустите приложение:
+    ```
+    docker-compose up -d
+    ```
 
-## English
+5. Доступ к приложению:
+    Перейдите на [http://localhost:8000](http://localhost:8000).
 
-This project is a management system for a WireGuard VPN server with additional mechanisms for masking and obfuscating traffic to bypass censorship. The system is based on WireGuard for VPN connection, Shadowsocks for traffic masking, and Xray for HTTP/TLS-level obfuscation. The user interface is implemented using Django.
+## Примеры использования
+### Создание конфигурации клиента
+1. Откройте веб-интерфейс.
+2. Выберите «Добавить клиента».
+3. Заполните данные клиента и сохраните.
+4. Скачайте или просмотрите конфигурацию.
 
-### Main components of the project:
+## FAQ
+### Что делать при сбое запуска?
+- Проверьте логи приложения:
+    ```
+    docker logs wg-manager
+    ```
+- Убедитесь, что все зависимости установлены.
 
-- **WireGuard**: The primary VPN providing encryption and secure data transmission.
-- **Shadowsocks**: A service that adds an extra layer of masking to the VPN traffic to bypass ISP restrictions and censorship.
-- **Xray**: A tool for obfuscating traffic, making it look like regular web traffic, which makes it harder for VPN connections to be detected. Uses the VLESS protocol for traffic masking.
-- **Django**: A web framework for managing VPN configurations via a web interface.
+### Как добавить новый ключ WireGuard?
+1. Используйте интерфейс или CLI для добавления.
+2. Убедитесь, что ключ уникален.
 
-### Key features of the project:
+## Автоматический запуск
 
-- Add and remove WireGuard clients via a web interface.
-- Option to enable/disable traffic obfuscation.
-- Manage WireGuard, Shadowsocks, and Xray configurations via the web interface.
+### Настройка systemd
+Для обеспечения автоматического запуска после перезагрузки:
+1. Создайте файл `/etc/systemd/system/wg-manager.service`:
+   ```
+   sudo nano /etc/systemd/system/wg-manager.service
+   ```
 
-The goal of the project is to create a convenient and secure tool for managing VPN configurations and bypassing internet censorship.
+2. Вставьте следующую конфигурацию:
+   ```ini
+   [Unit]
+   Description=WireGuard Manager Application
+   After=network.target
 
-**The project is currently under development. Instructions for configuration and running the scripts will be added later.**
+   [Service]
+   Type=forking
+   User=your_user
+   Group=your_group
+   WorkingDirectory=/path/to/your/app
+   ExecStart=/bin/ /path/to/your/app/scripts/start.sh
+   ExecStop=/bin/ /path/to/your/app/scripts/stop.sh
+   Restart=always
+   RestartSec=5
 
----
+   [Install]
+   WantedBy=multi-user.target
+   ```
 
-## Quick Start
+3. Активируйте сервис:
+   ```
+   sudo systemctl enable wg-manager
+   ```
 
-1. **Clone the repository**:
-   ```bash
-   git clone https://github.com/Anfikus/wg-manager.git
+4. Перезагрузите сервер и проверьте:
+   ```
+   sudo reboot
+   ```
 
-2. **Navigate into the project directory**:
-   ```bash
-   cd wg-manager
+### Ручной запуск и остановка
+Для запуска вручную:
+```
+sudo systemctl start wg-manager
+```
 
-3. **Set up your environment**:
-   ```bash
-   python -m venv wg-manager-venv
-   source wg-manager-venv/bin/activate
+Для остановки:
+```
+sudo systemctl stop wg-manager
+```
 
-4. **Install dependencies using Poetry**:
-   ```bash
-   poetry install
-
-5. **Set environment variables: Make sure to create a .env file or set your environment variables as follows**:
-   ```bash
-   DEBUG=True
-   SECRET_KEY=<ваш_секретный_ключ>
-   ALLOWED_HOSTS=*
-   ...
-
-6. **Run database migrations**:
-   ```bash
-   python manage.py migrate
-
-7. **Run the application**:
-   ```bash
-   python manage.py runserver
-
-
-## Contributing
-Contributions are welcome! Please fork the repository and create a pull request for review.
-
-## License
-MIT License. See LICENSE file for details.
+## Лицензия
+Данный проект распространяется под лицензией MIT. См. [LICENSE](LICENSE) для получения дополнительной информации.

@@ -1,11 +1,15 @@
 #!/usr/bin/env python
 import os
 import sys
-
-# Установка пути к настройкам Django (указываем development или production в зависимости от окружения)
-os.environ.setdefault('DJANGO_SETTINGS_MODULE', 'config.settings.development')
+from dotenv import load_dotenv
 
 if __name__ == "__main__":
+    # Загружаем переменные окружения из .env
+    load_dotenv()
+
+    # Устанавливаем настройки проекта
+    os.environ.setdefault("DJANGO_SETTINGS_MODULE", os.getenv("DJANGO_SETTINGS_MODULE", "config.settings.settings"))
+    
     try:
         from django.core.management import execute_from_command_line
     except ImportError as exc:
@@ -14,4 +18,5 @@ if __name__ == "__main__":
             "available on your PYTHONPATH environment variable? Did you "
             "forget to activate a virtual environment?"
         ) from exc
+    
     execute_from_command_line(sys.argv)
