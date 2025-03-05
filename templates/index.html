@@ -1,0 +1,488 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>RouteRus - Генератор маршрутов для российских сервисов</title>
+    <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0-alpha1/dist/css/bootstrap.min.css" rel="stylesheet">
+    <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/bootstrap-icons@1.10.0/font/bootstrap-icons.css">
+    <style>
+        body {
+            padding-top: 2rem;
+            padding-bottom: 2rem;
+            background-color: #f8f9fa;
+        }
+        .header {
+            margin-bottom: 2rem;
+            border-bottom: 1px solid #e5e5e5;
+            padding-bottom: 1rem;
+        }
+        .logo {
+            font-weight: bold;
+            color: #d9534f;
+        }
+        .footer {
+            margin-top: 2rem;
+            padding-top: 1rem;
+            border-top: 1px solid #e5e5e5;
+            color: #777;
+            font-size: 0.9rem;
+        }
+        .card {
+            margin-bottom: 1.5rem;
+            box-shadow: 0 0.125rem 0.25rem rgba(0,0,0,0.075);
+        }
+        .progress {
+            height: 1.5rem;
+        }
+        #processingStatus {
+            display: none;
+        }
+        #resultsSection {
+            display: none;
+        }
+        .service-list {
+            max-height: 300px;
+            overflow-y: auto;
+            padding: 10px;
+            border: 1px solid #ddd;
+            border-radius: 5px;
+            background-color: #f9f9f9;
+            margin-bottom: 15px;
+        }
+        .service-item {
+            display: flex;
+            justify-content: space-between;
+            padding: 5px;
+            border-bottom: 1px solid #eee;
+        }
+        .service-item:last-child {
+            border-bottom: none;
+        }
+        .domain-info {
+            font-weight: 500;
+        }
+        .format-option {
+            padding: 10px;
+            margin-bottom: 5px;
+            background-color: #f8f9fa;
+            border: 1px solid #dee2e6;
+            border-radius: 5px;
+            cursor: pointer;
+        }
+        .format-option.selected {
+            background-color: #d1e7dd;
+            border-color: #badbcc;
+        }
+        .btn-download {
+            margin: 5px;
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <div class="header">
+            <div class="row">
+                <div class="col-md-8">
+                    <h1><span class="logo">RouteRus</span> - Генератор маршрутов для российских сервисов</h1>
+                    <p class="lead">Создание статических маршрутов для роутера, чтобы российские сервисы не проходили через VPN</p>
+                </div>
+                <div class="col-md-4 text-end">
+                    <img src="https://cdn-icons-png.flaticon.com/512/330/330437.png" alt="Russian Flag" height="60">
+                </div>
+            </div>
+        </div>
+
+        <div class="row">
+            <div class="col-md-4">
+                <div class="card">
+                    <div class="card-header">
+                        <h4>Категории сервисов</h4>
+                    </div>
+                    <div class="card-body">
+                        <div class="mb-3">
+                            <label for="categorySelect" class="form-label">Выберите категорию:</label>
+                            <select class="form-select" id="categorySelect">
+                                <option value="" selected>Выберите категорию...</option>
+                                {% for category in services_by_category %}
+                                <option value="{{ category }}">{{ category }}</option>
+                                {% endfor %}
+                            </select>
+                        </div>
+                        <div class="mb-3">
+                            <label class="form-label">Сервисы в выбранной категории:</label>
+                            <div class="service-list" id="servicesList">
+                                <div class="text-muted text-center">Выберите категорию для просмотра сервисов</div>
+                            </div>
+                        </div>
+                        <div class="border p-3 rounded">
+                            <h5>Добавить сервис</h5>
+                            <div class="mb-3">
+                                <label for="newCategoryInput" class="form-label">Категория:</label>
+                                <input type="text" class="form-control" id="newCategoryInput" placeholder="Введите или выберите существующую" list="existingCategories">
+                                <datalist id="existingCategories">
+                                    {% for category in services_by_category %}
+                                    <option value="{{ category }}">
+                                    {% endfor %}
+                                </datalist>
+                            </div>
+                            <div class="mb-3">
+                                <label for="newServiceInput" class="form-label">Сервис (домен):</label>
+                                <input type="text" class="form-control" id="newServiceInput" placeholder="example.ru">
+                            </div>
+                            <button type="button" class="btn btn-primary" id="addServiceBtn">Добавить сервис</button>
+                        </div>
+                    </div>
+                </div>
+            </div>
+
+            <div class="col-md-8">
+                <div class="card">
+                    <div class="card-header">
+                        <h4>Генерация маршрутов</h4>
+                    </div>
+                    <div class="card-body">
+                        <div class="mb-3">
+                            <label class="form-label">Выберите форматы маршрутов:</label>
+                            <div class="row" id="formatOptions">
+                                {% for format in formats %}
+                                <div class="col-md-6">
+                                    <div class="format-option" data-format="{{ format.id }}">
+                                        <div class="form-check">
+                                            <input class="form-check-input format-checkbox" type="checkbox" id="format{{ format.id }}" name="formats" value="{{ format.id }}">
+                                            <label class="form-check-label" for="format{{ format.id }}">
+                                                <strong>{{ format.name }}</strong>
+                                            </label>
+                                        </div>
+                                    </div>
+                                </div>
+                                {% endfor %}
+                            </div>
+                        </div>
+                        <button type="button" class="btn btn-success btn-lg" id="generateBtn">
+                            <i class="bi bi-play-fill"></i> Сгенерировать маршруты
+                        </button>
+                    </div>
+                </div>
+
+                <div class="card" id="processingStatus">
+                    <div class="card-header">
+                        <h4>Статус обработки</h4>
+                    </div>
+                    <div class="card-body">
+                        <div class="progress mb-3">
+                            <div id="progressBar" class="progress-bar progress-bar-striped progress-bar-animated" role="progressbar" style="width: 0%" aria-valuenow="0" aria-valuemin="0" aria-valuemax="100">0%</div>
+                        </div>
+                        <p id="statusMessage">Инициализация...</p>
+                    </div>
+                </div>
+
+                <div class="card" id="resultsSection">
+                    <div class="card-header">
+                        <h4>Результаты</h4>
+                    </div>
+                    <div class="card-body">
+                        <p class="lead">Обработка завершена! Файлы маршрутов готовы для скачивания.</p>
+                        <div class="alert alert-info">
+                            <strong>Как использовать:</strong> Скачайте файлы маршрутов для выбранных форматов и примените их на вашем роутере или компьютере.
+                        </div>
+                        <h5>Доступные форматы для скачивания:</h5>
+                        <div id="downloadLinks" class="mb-3">
+                            <!-- Здесь будут ссылки на скачивание -->
+                        </div>
+                        <button type="button" class="btn btn-secondary" id="newGenerationBtn">
+                            <i class="bi bi-arrow-counterclockwise"></i> Начать новую генерацию
+                        </button>
+                    </div>
+                </div>
+            </div>
+        </div>
+
+        <div class="footer text-center">
+            <p>RouteRus &copy; 2025 - Генератор маршрутов для российских сервисов</p>
+        </div>
+    </div>
+
+    <!-- Модальное окно с сообщением -->
+    <div class="modal fade" id="messageModal" tabindex="-1" aria-labelledby="messageModalLabel" aria-hidden="true">
+        <div class="modal-dialog">
+            <div class="modal-content">
+                <div class="modal-header">
+                    <h5 class="modal-title" id="messageModalLabel">Сообщение</h5>
+                    <button type="button" class="btn-close" data-bs-dismiss="modal" aria-label="Close"></button>
+                </div>
+                <div class="modal-body" id="messageModalBody">
+                    <!-- Содержимое сообщения -->
+                </div>
+                <div class="modal-footer">
+                    <button type="button" class="btn btn-primary" data-bs-dismiss="modal">ОК</button>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0-alpha1/dist/js/bootstrap.bundle.min.js"></script>
+    <script>
+        document.addEventListener('DOMContentLoaded', function() {
+            // Элементы страницы
+            const categorySelect = document.getElementById('categorySelect');
+            const servicesList = document.getElementById('servicesList');
+            const newCategoryInput = document.getElementById('newCategoryInput');
+            const newServiceInput = document.getElementById('newServiceInput');
+            const addServiceBtn = document.getElementById('addServiceBtn');
+            const formatOptions = document.querySelectorAll('.format-option');
+            const generateBtn = document.getElementById('generateBtn');
+            const processingStatus = document.getElementById('processingStatus');
+            const progressBar = document.getElementById('progressBar');
+            const statusMessage = document.getElementById('statusMessage');
+            const resultsSection = document.getElementById('resultsSection');
+            const downloadLinks = document.getElementById('downloadLinks');
+            const newGenerationBtn = document.getElementById('newGenerationBtn');
+
+            // Модальное окно
+            const messageModal = new bootstrap.Modal(document.getElementById('messageModal'));
+            const messageModalBody = document.getElementById('messageModalBody');
+
+            // Загрузка сервисов при выборе категории
+            categorySelect.addEventListener('change', function() {
+                const category = this.value;
+                loadServicesForCategory(category);
+            });
+
+            // Выбор формата при клике
+            formatOptions.forEach(option => {
+                option.addEventListener('click', function() {
+                    const checkbox = this.querySelector('input[type="checkbox"]');
+                    checkbox.checked = !checkbox.checked;
+                    this.classList.toggle('selected', checkbox.checked);
+                });
+            });
+
+            // Добавление нового сервиса
+            addServiceBtn.addEventListener('click', function() {
+                const category = newCategoryInput.value.trim();
+                const service = newServiceInput.value.trim();
+
+                if (!category) {
+                    showMessage('Ошибка', 'Необходимо указать категорию');
+                    return;
+                }
+
+                if (!service) {
+                    showMessage('Ошибка', 'Необходимо указать сервис');
+                    return;
+                }
+
+                addService(category, service);
+            });
+
+            // Генерация маршрутов
+            generateBtn.addEventListener('click', function() {
+                const selectedFormats = [];
+                document.querySelectorAll('input[name="formats"]:checked').forEach(checkbox => {
+                    selectedFormats.push(checkbox.value);
+                });
+
+                if (selectedFormats.length === 0) {
+                    showMessage('Ошибка', 'Необходимо выбрать хотя бы один формат маршрутов');
+                    return;
+                }
+
+                generateRoutes(selectedFormats);
+            });
+
+            // Начать новую генерацию
+            newGenerationBtn.addEventListener('click', function() {
+                resultsSection.style.display = 'none';
+            });
+
+            // Функция загрузки сервисов для выбранной категории
+            function loadServicesForCategory(category) {
+                if (!category) {
+                    servicesList.innerHTML = '<div class="text-muted text-center">Выберите категорию для просмотра сервисов</div>';
+                    return;
+                }
+
+                fetch('/api/services')
+                    .then(response => response.json())
+                    .then(data => {
+                        if (data[category] && data[category].length > 0) {
+                            let html = '';
+                            data[category].forEach(service => {
+                                html += `
+                                    <div class="service-item">
+                                        <span class="domain-info">${service}</span>
+                                    </div>
+                                `;
+                            });
+                            servicesList.innerHTML = html;
+                        } else {
+                            servicesList.innerHTML = '<div class="text-muted text-center">Нет сервисов в данной категории</div>';
+                        }
+                    })
+                    .catch(error => {
+                        console.error('Ошибка:', error);
+                        servicesList.innerHTML = '<div class="text-danger text-center">Ошибка загрузки сервисов</div>';
+                    });
+            }
+
+            // Функция добавления сервиса
+            function addService(category, service) {
+                fetch('/api/add_service', {
+                    method: 'POST',
+                    headers: {
+                        'Content-Type': 'application/json'
+                    },
+                    body: JSON.stringify({ category, service })
+                })
+                .then(response => response.json())
+                .then(data => {
+                    if (data.success) {
+                        showMessage('Успех', data.message);
+                        newServiceInput.value = '';
+
+                        // Обновляем список категорий
+                        if (!document.querySelector(`#existingCategories option[value="${category}"]`)) {
+                            const option = document.createElement('option');
+                            option.value = category;
+                            document.getElementById('existingCategories').appendChild(option);
+
+                            // Добавляем категорию в выпадающий список, если её там нет
+                            if (!document.querySelector(`#categorySelect option[value="${category}"]`)) {
+                                const selectOption = document.createElement('option');
+                                selectOption.value = category;
+                                selectOption.textContent = category;
+                                categorySelect.appendChild(selectOption);
+                            }
+                        }
+
+                        // Если текущая категория совпадает с только что добавленной, обновляем список сервисов
+                        if (categorySelect.value === category) {
+                            loadServicesForCategory(category);
+                        }
+                    } else {
+                        showMessage('Ошибка', data.message);
+                    }
+                })
+                .catch(error => {
+                    console.error('Ошибка:', error);
+                    showMessage('Ошибка', 'Не удалось добавить сервис. Пожалуйста, попробуйте позже.');
+                });
+            }
+
+            // Функция генерации маршрутов
+            function generateRoutes(formats) {
+                // Показываем раздел статуса и скрываем результаты
+                processingStatus.style.display = 'block';
+                resultsSection.style.display = 'none';
+                downloadLinks.innerHTML = '';
+
+                // Сбрасываем прогресс
+                progressBar.style.width = '0%';
+                progressBar.textContent = '0%';
+                progressBar.setAttribute('aria-valuenow', '0');
+                statusMessage.textContent = 'Инициализация...';
+
+                // Отправляем запрос на генерацию
+                fetch('/api/generate', {
+                    method: 'POST',
+                    headers: {
+                        'Content-Type': 'application/json'
+                    },
+                    body: JSON.stringify({ formats })
+                })
+                .then(response => response.json())
+                .then(data => {
+                    if (data.success) {
+                        // Запускаем проверку статуса
+                        checkStatus();
+                    } else {
+                        showMessage('Ошибка', data.message);
+                        processingStatus.style.display = 'none';
+                    }
+                })
+                .catch(error => {
+                    console.error('Ошибка:', error);
+                    showMessage('Ошибка', 'Не удалось запустить генерацию маршрутов. Пожалуйста, попробуйте позже.');
+                    processingStatus.style.display = 'none';
+                });
+            }
+
+            // Функция проверки статуса генерации
+            function checkStatus() {
+                fetch('/api/status')
+                    .then(response => response.json())
+                    .then(data => {
+                        // Обновляем прогресс
+                        progressBar.style.width = data.progress + '%';
+                        progressBar.textContent = data.progress + '%';
+                        progressBar.setAttribute('aria-valuenow', data.progress);
+                        statusMessage.textContent = data.message;
+
+                        if (data.is_processing) {
+                            // Если обработка продолжается, проверяем статус снова через 1 секунду
+                            setTimeout(checkStatus, 1000);
+                        } else {
+                            // Обработка завершена
+                            if (data.error) {
+                                // Произошла ошибка
+                                showMessage('Ошибка', data.error);
+                                processingStatus.style.display = 'none';
+                            } else {
+                                // Успешно завершено
+                                processingStatus.style.display = 'none';
+                                showResults(data.output_files);
+                            }
+                        }
+                    })
+                    .catch(error => {
+                        console.error('Ошибка при проверке статуса:', error);
+                        setTimeout(checkStatus, 2000); // Пробуем еще раз через 2 секунды
+                    });
+            }
+
+            // Показать результаты генерации
+            function showResults(outputFiles) {
+                // Создаем ссылки для скачивания
+                downloadLinks.innerHTML = '';
+
+                // Получаем информацию о форматах
+                fetch('/api/available_formats')
+                    .then(response => response.json())
+                    .then(formats => {
+                        const formatMap = {};
+                        formats.forEach(format => {
+                            formatMap[format.id] = format.name;
+                        });
+
+                        // Создаем кнопки для скачивания каждого формата
+                        Object.keys(outputFiles).forEach(formatId => {
+                            const formatName = formatMap[formatId] || formatId;
+
+                            const btn = document.createElement('a');
+                            btn.href = `/api/download/${formatId}`;
+                            btn.className = 'btn btn-primary btn-download';
+                            btn.innerHTML = `<i class="bi bi-download"></i> ${formatName}`;
+
+                            downloadLinks.appendChild(btn);
+                        });
+
+                        // Показываем раздел с результатами
+                        resultsSection.style.display = 'block';
+                    })
+                    .catch(error => {
+                        console.error('Ошибка при получении форматов:', error);
+                        showMessage('Ошибка', 'Не удалось загрузить информацию о форматах. Попробуйте обновить страницу.');
+                    });
+            }
+
+            // Функция отображения сообщения
+            function showMessage(title, message) {
+                document.getElementById('messageModalLabel').textContent = title;
+                messageModalBody.textContent = message;
+                messageModal.show();
+            }
+        });
+    </script>
+</body>
+</html>
