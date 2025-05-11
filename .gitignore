@@ -1,24 +1,42 @@
-# Виртуальные окружения
-venv/
+# Чувствительные данные
 .env
+*.key
+*.pem
+*.crt
+
+# Данные пользователей
+/data/
+/logs/
+
+# SSL-сертификаты
+/ssl/*.key
+/ssl/*.pem
+/ssl/*.crt
+
+# WireGuard ключи
+/config/wireguard/*_private.key
+
+# Директории Docker
+.docker/
+
+# Python кэш
 __pycache__/
 *.py[cod]
 *.class
-
-# Логи
-logs/
-*.log
-
-# Данные базы данных
-data/db/
-
-# SSL сертификаты (для безопасности)
-ssl/*.key
-
-# Личные конфигурации
-config/wireguard/wg0_private.key
-
-# Временные файлы
-.DS_Store
-.idea/
-.vscode/
+*.so
+.Python
+env/
+build/
+develop-eggs/
+dist/
+downloads/
+eggs/
+.eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+*.egg-info/
+.installed.cfg
+*.egg

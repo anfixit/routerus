@@ -4,21 +4,21 @@ services:
   # База данных PostgreSQL
   db:
     image: postgres:16-alpine
-    container_name: ${PROJECT_NAME}-db
+    container_name: \${PROJECT_NAME}-db
     restart: unless-stopped
     volumes:
       - ./data/db:/var/lib/postgresql/data
     environment:
-      POSTGRES_DB: ${DB_NAME}
-      POSTGRES_USER: ${DB_USER}
-      POSTGRES_PASSWORD: ${DB_PASSWORD}
+      POSTGRES_DB: \${DB_NAME}
+      POSTGRES_USER: \${DB_USER}
+      POSTGRES_PASSWORD: \${DB_PASSWORD}
     networks:
       - backend
 
   # Nginx как обратный прокси
   nginx:
     image: nginx:alpine
-    container_name: ${PROJECT_NAME}-nginx
+    container_name: \${PROJECT_NAME}-nginx
     restart: unless-stopped
     volumes:
       - ./config/nginx:/etc/nginx/conf.d
@@ -38,28 +38,45 @@ services:
     build:
       context: ./services/api
       dockerfile: Dockerfile
-    container_name: ${PROJECT_NAME}-api
+    container_name: \${PROJECT_NAME}-api
     restart: unless-stopped
+    ports:
+      - "8000:8000"
     volumes:
       - ./services/api:/app
       - ./config/wireguard:/etc/wireguard
     environment:
-      - DB_NAME=${DB_NAME}
-      - DB_USER=${DB_USER}
-      - DB_PASSWORD=${DB_PASSWORD}
-      - DB_HOST=${DB_HOST}
-      - DB_PORT=${DB_PORT}
-      - ADMIN_USERNAME=${ADMIN_USERNAME}
-      - ADMIN_PASSWORD=${ADMIN_PASSWORD}
+      - DB_NAME=\${DB_NAME}
+      - DB_USER=\${DB_USER}
+      - DB_PASSWORD=\${DB_PASSWORD}
+      - DB_HOST=\${DB_HOST}
+      - DB_PORT=\${DB_PORT}
+      - ADMIN_USERNAME=\${ADMIN_USERNAME}
+      - ADMIN_PASSWORD=\${ADMIN_PASSWORD}
     depends_on:
       - db
     networks:
       - backend
 
+  # React Frontend
+  frontend:
+    build:
+      context: ./services/frontend
+      dockerfile: Dockerfile
+    container_name: \${PROJECT_NAME}-frontend
+    restart: unless-stopped
+    ports:
+      - "80:80"
+    depends_on:
+      - api
+    networks:
+      - frontend
+      - backend
+
   # WireGuard VPN
   wireguard:
     image: linuxserver/wireguard
-    container_name: ${PROJECT_NAME}-wireguard
+    container_name: \${PROJECT_NAME}-wireguard
     cap_add:
       - NET_ADMIN
       - SYS_MODULE
@@ -69,7 +86,7 @@ services:
     volumes:
       - ./config/wireguard:/config
     ports:
-      - "${WG_PORT}:${WG_PORT}/udp"
+      - "\${WG_PORT}:\${WG_PORT}/udp"
     restart: unless-stopped
     sysctls:
       - net.ipv4.conf.all.src_valid_mark=1
@@ -79,34 +96,34 @@ services:
   # Shadowsocks для маскировки
   shadowsocks:
     image: shadowsocks/shadowsocks-libev
-    container_name: ${PROJECT_NAME}-shadowsocks
+    container_name: \${PROJECT_NAME}-shadowsocks
     restart: unless-stopped
     volumes:
       - ./config/shadowsocks:/etc/shadowsocks-libev
     ports:
-      - "${SS_PORT}:${SS_PORT}/tcp"
-      - "${SS_PORT}:${SS_PORT}/udp"
+      - "\${SS_PORT}:\${SS_PORT}/tcp"
+      - "\${SS_PORT}:\${SS_PORT}/udp"
     networks:
       - vpn
 
   # Xray для дополнительной маскировки
   xray:
     image: teddysun/xray
-    container_name: ${PROJECT_NAME}-xray
+    container_name: \${PROJECT_NAME}-xray
     restart: unless-stopped
     volumes:
       - ./config/xray:/etc/xray
       - ./ssl:/etc/ssl/xray
     ports:
-      - "${XRAY_PORT}:${XRAY_PORT}/tcp"
-      - "${XRAY_PORT}:${XRAY_PORT}/udp"
+      - "\${XRAY_PORT}:\${XRAY_PORT}/tcp"
+      - "\${XRAY_PORT}:\${XRAY_PORT}/udp"
     networks:
       - vpn
 
   # Prometheus для сбора метрик
   prometheus:
     image: prom/prometheus
-    container_name: ${PROJECT_NAME}-prometheus
+    container_name: \${PROJECT_NAME}-prometheus
     restart: unless-stopped
     volumes:
       - ./config/prometheus:/etc/prometheus
@@ -117,24 +134,24 @@ services:
       - '--web.console.libraries=/usr/share/prometheus/console_libraries'
       - '--web.console.templates=/usr/share/prometheus/consoles'
     ports:
-      - "127.0.0.1:${PROMETHEUS_PORT}:9090"
+      - "127.0.0.1:\${PROMETHEUS_PORT}:9090"
     networks:
       - monitoring
 
   # Grafana для визуализации метрик
   grafana:
     image: grafana/grafana
-    container_name: ${PROJECT_NAME}-grafana
+    container_name: \${PROJECT_NAME}-grafana
     restart: unless-stopped
     volumes:
       - ./data/grafana:/var/lib/grafana
       - ./config/grafana/provisioning:/etc/grafana/provisioning
     environment:
-      - GF_SECURITY_ADMIN_USER=${ADMIN_USERNAME}
-      - GF_SECURITY_ADMIN_PASSWORD=${ADMIN_PASSWORD}
-      - GF_SERVER_ROOT_URL=https://${DOMAIN}/grafana
+      - GF_SECURITY_ADMIN_USER=\${ADMIN_USERNAME}
+      - GF_SECURITY_ADMIN_PASSWORD=\${ADMIN_PASSWORD}
+      - GF_SERVER_ROOT_URL=https://\${DOMAIN}/grafana
     ports:
-      - "127.0.0.1:${GRAFANA_PORT}:3000"
+      - "127.0.0.1:\${GRAFANA_PORT}:3000"
     depends_on:
       - prometheus
     networks:
@@ -144,7 +161,7 @@ services:
   # Node Exporter для сбора метрик с хоста
   node-exporter:
     image: prom/node-exporter
-    container_name: ${PROJECT_NAME}-node-exporter
+    container_name: \${PROJECT_NAME}-node-exporter
     restart: unless-stopped
     volumes:
       - /proc:/host/proc:ro
@@ -160,7 +177,7 @@ services:
   # Cadvisor для сбора метрик с контейнеров
   cadvisor:
     image: gcr.io/cadvisor/cadvisor
-    container_name: ${PROJECT_NAME}-cadvisor
+    container_name: \${PROJECT_NAME}-cadvisor
     restart: unless-stopped
     volumes:
       - /:/rootfs:ro
@@ -173,7 +190,7 @@ services:
   # Alertmanager для отправки уведомлений
   alertmanager:
     image: prom/alertmanager
-    container_name: ${PROJECT_NAME}-alertmanager
+    container_name: \${PROJECT_NAME}-alertmanager
     restart: unless-stopped
     volumes:
       - ./config/alertmanager:/etc/alertmanager

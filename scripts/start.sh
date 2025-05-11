@@ -1,8 +1,5 @@
 #!/bin/bash
 
-# Остановка скрипта при любой ошибке
-set -e
-
 # Определение цветов для вывода
 GREEN='\033[0;32m'
 BLUE='\033[0;34m'
@@ -11,15 +8,15 @@ NC='\033[0m' # No Color
 
 # Функция для красивого вывода
 log() {
-    echo -e "${BLUE}[INFO]${NC} $1"
+    echo -e "[INFO] $1"
 }
 
 success() {
-    echo -e "${GREEN}[SUCCESS]${NC} $1"
+    echo -e "[SUCCESS] $1"
 }
 
 error() {
-    echo -e "${RED}[ERROR]${NC} $1"
+    echo -e "[ERROR] $1"
     exit 1
 }
 
@@ -76,9 +73,9 @@ docker-compose exec api python -m app.initial_setup
 
 success "RouteRus VPN успешно запущен!"
 echo ""
-echo "Доступ к административной панели: https://vpn.routerus.ru/admin"
-echo "API документация: https://vpn.routerus.ru/docs"
-echo "Grafana дашборды: https://vpn.routerus.ru/grafana"
+echo "Доступ к административной панели: http://ваш_сервер"
+echo "API документация: http://ваш_сервер:8000/docs"
+echo "Grafana дашборды: http://ваш_сервер:8000/grafana"
 echo ""
 echo "Логин администратора: $(grep ADMIN_USERNAME .env | cut -d '=' -f2)"
 echo "Пароль администратора: $(grep ADMIN_PASSWORD .env | cut -d '=' -f2)"
