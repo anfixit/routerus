@@ -22,6 +22,9 @@ class ShadowsocksManager:
     
     def _initialize_server_password(self) -> str:
         """Инициализация пароля сервера Shadowsocks."""
+        # Убедимся, что директория существует
+        os.makedirs(self.config_dir, exist_ok=True)
+        
         password_file = os.path.join(self.config_dir, "password.txt")
         
         if os.path.exists(password_file):
@@ -87,6 +90,9 @@ class ShadowsocksManager:
     
     def update_server_config(self, clients: List[Dict]) -> None:
         """Обновить серверную конфигурацию Shadowsocks на основе списка клиентов."""
+        # Убедимся, что директория существует
+        os.makedirs(self.config_dir, exist_ok=True)
+        
         # Подготовка списка портов и паролей для активных клиентов
         ports_config = {}
         

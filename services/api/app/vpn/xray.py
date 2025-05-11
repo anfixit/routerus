@@ -16,6 +16,9 @@ class XrayManager:
         self.port = settings.XRAY_PORT
         self.server_uuid = settings.XRAY_UUID
         
+        # Создаем директорию если не существует
+        os.makedirs(self.config_dir, exist_ok=True)
+        
         # Инициализируем UUID сервера, если его нет
         if not self.server_uuid:
             self._initialize_server_uuid()
@@ -112,6 +115,9 @@ class XrayManager:
     
     def update_server_config(self, clients: List[Dict]) -> None:
         """Обновить серверную конфигурацию Xray на основе списка клиентов."""
+        # Создаем директорию если не существует
+        os.makedirs(self.config_dir, exist_ok=True)
+        
         # Список клиентских UUID
         client_ids = []
         

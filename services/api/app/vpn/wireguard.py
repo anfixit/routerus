@@ -20,6 +20,9 @@ class WireGuardManager:
         self.server_private_key = settings.WG_PRIVATE_KEY
         self.server_public_key = settings.WG_PUBLIC_KEY
 
+        # Создаем директорию если не существует
+        os.makedirs(self.config_dir, exist_ok=True)
+
         # Инициализируем ключи сервера, если их нет
         if not self.server_private_key or not self.server_public_key:
             self._initialize_server_keys()
@@ -119,6 +122,9 @@ PersistentKeepalive = 25
 
     def update_server_config(self, clients: List[Dict]) -> None:
         """Обновить серверную конфигурацию WireGuard на основе списка клиентов."""
+        # Создаем директорию если не существует
+        os.makedirs(self.config_dir, exist_ok=True)
+        
         # Получаем первый хост для сервера
         server_ip = str(next(self.network.hosts()))
         
