@@ -1,0 +1,43 @@
+site_name: RouteRus VPN
+nav:
+  - Главная: index.md
+  - Руководство пользователя:
+      - Обзор: user_guide/index.md
+      - Подключение: user_guide/connection.md
+      - Устранение проблем: user_guide/troubleshooting.md
+  - Руководство администратора:
+      - Обзор: admin_guide/index.md
+      - Установка и настройка: admin_guide/installation.md
+      - Управление пользователями: admin_guide/user_management.md
+      - Мониторинг: admin_guide/monitoring.md
+  - API документация:
+      - Обзор API: api_docs/index.md
+      - Endpoints: api_docs/endpoints.md
+      - Аутентификация: api_docs/authentication.md
+  - Руководство разработчика:
+      - Обзор: dev_guide/index.md
+      - Архитектура: dev_guide/architecture.md
+      - Разработка: dev_guide/development.md
+
+theme:
+  name: material
+  palette:
+    primary: indigo
+    accent: indigo
+  language: ru
+  features:
+    - navigation.instant
+    - navigation.tracking
+    - navigation.expand
+    - navigation.indexes
+    - toc.integrate
+
+markdown_extensions:
+  - admonition
+  - codehilite
+  - pymdownx.superfences
+  - pymdownx.tabbed
+  - pymdownx.details
+
+plugins:
+  - search

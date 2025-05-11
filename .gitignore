@@ -1,0 +1,24 @@
+# Виртуальные окружения
+venv/
+.env
+__pycache__/
+*.py[cod]
+*.class
+
+# Логи
+logs/
+*.log
+
+# Данные базы данных
+data/db/
+
+# SSL сертификаты (для безопасности)
+ssl/*.key
+
+# Личные конфигурации
+config/wireguard/wg0_private.key
+
+# Временные файлы
+.DS_Store
+.idea/
+.vscode/
