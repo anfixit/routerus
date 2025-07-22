@@ -1,45 +1,45 @@
-# Конфиденциальные данные
-.env
-config/keys/
-config/secure/
-config/*.json
-*.pem
-*.key
-
-# Кеши и временные файлы
-config/__pycache__/
-*.py[cod]
-*.swp
-*.bak
-*.log
+# Python
 __pycache__/
-*.sqlite3  # Если вдруг тесты будут использовать SQLite
+*.py[cod]
+*$py.class
+*.so
+.Python
+venv/
+env/
+ENV/
 
-# Игнорируем пользовательские настройки IDE и редакторов
+# Django
+db.sqlite3
+db.sqlite3-journal
+/static/
+/media/
+/staticfiles/
+
+# Environment
+.env
+.env.local
+.env.production
+
+# Logs
+logs/
+*.log
+
+# OS
+.DS_Store
+Thumbs.db
+
+# IDE
 .vscode/
 .idea/
+*.swp
+*.swo
 
-# Файлы конфигурации
-*.yaml
-docker-compose.override.yml  # Локальные настройки для Docker
+# Certificates and keys
+*.pem
+*.key
+*.crt
+*.p12
 
-# Миграции Django
-**/migrations/
-
-# Игнорируем конфигурации пользователей VPN
-config/wireguard/clients/
-
-# Docker файлы
-postgres_data/
-
-# Временные файлы и директории
-/tmp/
-var/log/
-tmp/loki_logs/
-
-# Секреты Docker
-docker/secrets/
-
-# Логи Promtail и Loki
-/var/log/promtail/
-/var/log/loki/
+# VPN configs
+*.conf
+wg*.key

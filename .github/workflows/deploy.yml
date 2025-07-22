@@ -1,0 +1,150 @@
+name: Deploy Routerus VPN
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+
+    services:
+      postgres:
+        image: postgres:13
+        env:
+          POSTGRES_PASSWORD: test_password
+          POSTGRES_DB: test_db
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+        ports:
+          - 5432:5432
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python 3.12
+        uses: actions/setup-python@v4
+        with:
+          python-version: 3.12
+
+      - name: Install Poetry
+        run: |
+          curl -sSL https://install.python-poetry.org | python3 -
+          echo "$HOME/.local/bin" >> $GITHUB_PATH
+
+      - name: Install dependencies
+        run: |
+          poetry install --with dev
+
+      - name: Create test .env
+        run: |
+          echo "DEBUG=True" > .env
+          echo "SECRET_KEY=test-secret-key-for-github-actions" >> .env
+          echo "ALLOWED_HOSTS=localhost,127.0.0.1" >> .env
+          echo "DB_NAME=test_db" >> .env
+          echo "DB_USER=postgres" >> .env
+          echo "DB_PASSWORD=test_password" >> .env
+          echo "DB_HOST=localhost" >> .env
+          echo "DB_PORT=5432" >> .env
+          echo "DJANGO_SETTINGS_MODULE=config.settings.development" >> .env
+
+      - name: Run tests
+        run: |
+          poetry run python manage.py test
+
+      - name: Run lint checks
+        run: |
+          poetry run black --check .
+          poetry run flake8 .
+
+  deploy:
+    needs: test
+    runs-on: ubuntu-latest
+    if: github.ref == 'refs/heads/main' && github.event_name == 'push'
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup SSH
+        run: |
+          mkdir -p ~/.ssh
+          echo "${{ secrets.SSH_PRIVATE_KEY }}" > ~/.ssh/id_rsa
+          chmod 600 ~/.ssh/id_rsa
+          ssh-keyscan -H ${{ secrets.VPS_HOST }} >> ~/.ssh/known_hosts
+
+      - name: Deploy to VPS
+        run: |
+          ssh -o StrictHostKeyChecking=no ${{ secrets.VPS_USER }}@${{ secrets.VPS_HOST }} '
+            set -e
+
+            # Проверка, настроен ли уже сервер
+            if [ ! -d "/opt/routerus" ]; then
+              echo "🔧 Первоначальная настройка сервера..."
+              git clone https://github.com/YOUR_USERNAME/routerus.git /tmp/routerus
+              sudo bash /tmp/routerus/scripts/setup_server.sh
+              cd /opt/routerus
+              git clone https://github.com/YOUR_USERNAME/routerus.git .
+            else
+              cd /opt/routerus
+              sudo systemctl stop routerus || true
+              git pull origin main
+            fi
+
+            # Активация venv и установка зависимостей
+            source venv/bin/activate
+            poetry install --no-dev
+
+            # Создание .env файла из секретов GitHub
+            cat > .env << EOF
+            DEBUG=${{ secrets.DEBUG }}
+            SECRET_KEY="${{ secrets.SECRET_KEY }}"
+            ALLOWED_HOSTS="${{ secrets.ALLOWED_HOSTS }}"
+            DB_NAME=${{ secrets.DB_NAME }}
+            DB_USER=${{ secrets.DB_USER }}
+            DB_PASSWORD=${{ secrets.DB_PASSWORD }}
+            DB_HOST=${{ secrets.DB_HOST }}
+            DB_PORT=${{ secrets.DB_PORT }}
+            SHADOWSOCKS_SERVER=${{ secrets.SHADOWSOCKS_SERVER }}
+            SHADOWSOCKS_PORT=${{ secrets.SHADOWSOCKS_PORT }}
+            SHADOWSOCKS_PASSWORD=${{ secrets.SHADOWSOCKS_PASSWORD }}
+            SHADOWSOCKS_METHOD=${{ secrets.SHADOWSOCKS_METHOD }}
+            SHADOWSOCKS_TIMEOUT=${{ secrets.SHADOWSOCKS_TIMEOUT }}
+            XRAY_LOG_LEVEL=${{ secrets.XRAY_LOG_LEVEL }}
+            XRAY_VLESS_PORT=${{ secrets.XRAY_VLESS_PORT }}
+            XRAY_UUID=${{ secrets.XRAY_UUID }}
+            XRAY_VLESS_NETWORK=${{ secrets.XRAY_VLESS_NETWORK }}
+            XRAY_VLESS_PATH=${{ secrets.XRAY_VLESS_PATH }}
+            XRAY_SHADOWSOCKS_PORT=${{ secrets.XRAY_SHADOWSOCKS_PORT }}
+            XRAY_SHADOWSOCKS_METHOD=${{ secrets.XRAY_SHADOWSOCKS_METHOD }}
+            XRAY_SHADOWSOCKS_PASSWORD=${{ secrets.XRAY_SHADOWSOCKS_PASSWORD }}
+            XRAY_WIREGUARD_PORT=${{ secrets.XRAY_WIREGUARD_PORT }}
+            XRAY_WIREGUARD_SECRET_KEY=${{ secrets.XRAY_WIREGUARD_SECRET_KEY }}
+            XRAY_WIREGUARD_PUBLIC_KEY=${{ secrets.XRAY_WIREGUARD_PUBLIC_KEY }}
+            XRAY_WIREGUARD_ADDRESS=${{ secrets.XRAY_WIREGUARD_ADDRESS }}
+            WIREGUARD_PRIVATE_KEY=${{ secrets.WIREGUARD_PRIVATE_KEY }}
+            WIREGUARD_SERVER_PUBLIC_KEY=${{ secrets.WIREGUARD_SERVER_PUBLIC_KEY }}
+            WIREGUARD_SERVER_IP=${{ secrets.WIREGUARD_SERVER_IP }}
+            WIREGUARD_SERVER_PORT=${{ secrets.WIREGUARD_SERVER_PORT }}
+            WIREGUARD_PEERDNS=${{ secrets.WIREGUARD_PEERDNS }}
+            WIREGUARD_ALLOWEDIPS=${{ secrets.WIREGUARD_ALLOWEDIPS }}
+            WIREGUARD_PERSISTENTKEEPALIVE=${{ secrets.WIREGUARD_PERSISTENTKEEPALIVE }}
+            DJANGO_SETTINGS_MODULE=${{ secrets.DJANGO_SETTINGS_MODULE }}
+            EOF
+
+            # Применение миграций
+            python manage.py migrate
+
+            # Сбор статических файлов
+            python manage.py collectstatic --noinput
+
+            # Перезапуск сервисов
+            sudo systemctl start routerus
+            sudo systemctl enable routerus
+
+            echo "Деплой завершен успешно!"
+          '

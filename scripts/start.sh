@@ -1,49 +1,40 @@
 #!/bin/bash
+# start.sh: Скрипт для запуска всех сервисов
 
 set -e
 
-LOG_FILE="/var/log/wg-manager/start.log"
-exec >> $LOG_FILE 2>&1
+# Чтение переменных из .env и экспорт
+if [ ! -f /opt/routerus/.env ]; then
+    echo ".env файл не найден. Убедитесь, что он существует в /opt/routerus/"
+    exit 1
+fi
+set -o allexport
+source /opt/routerus/.env
+set +o allexport
 
-echo "[$(date +"%Y-%m-%d %H:%M:%S")] Starting WireGuard Manager..."
+# Проверка и создание директории для логов
+LOG_DIR="/var/log/routerus"
+if [ ! -d "$LOG_DIR" ]; then
+    mkdir -p "$LOG_DIR" || { echo "Не удалось создать директорию логов: $LOG_DIR"; exit 1; }
+    echo "Директория логов создана: $LOG_DIR"
+fi
 
-# 1. Запуск Loki
-echo "Starting Loki..."
-docker run -d \
-  --name=loki \
-  -p 3100:3100 \
-  -v /var/log/loki:/loki \
-  -v /path/to/loki-config.yml:/etc/loki/local-config.yaml \
-  grafana/loki:latest -config.file=/etc/loki/local-config.yaml
+# Запуск Nginx через systemctl
+if systemctl is-active --quiet nginx; then
+    echo "Nginx уже запущен."
+else
+    echo "Запуск Nginx..."
+    if ! systemctl start nginx; then
+        echo "Не удалось запустить Nginx. Проверьте systemctl status nginx.service"
+        exit 1
+    fi
+fi
 
-# 2. Запуск Promtail
-echo "Starting Promtail..."
-docker run -d \
-  --name=promtail \
-  -p 9080:9080 \
-  -v /var/log:/var/log \
-  -v /path/to/promtail-config.yml:/etc/promtail/config.yml \
-  grafana/promtail:latest -config.file=/etc/promtail/config.yml
-
-# 3. Запуск Nginx
-echo "Starting Nginx..."
-sudo nginx -c /path/to/nginx.conf
-
-# 4. Запуск Shadowsocks
-echo "Starting Shadowsocks..."
-ssserver -c /path/to/shadowsocks.json --daemon
-
-# 5. Запуск Xray
-echo "Starting Xray..."
-xray -config /path/to/xray.json &
-
-# 6. Запуск Gunicorn
-echo "Starting Gunicorn..."
-gunicorn wg_manager.wsgi:application --bind 0.0.0.0:8000 --workers 3 &
-
-# 7. Загрузка и очистка логов через Dropbox
-echo "Uploading and cleaning logs via Dropbox..."
-/path/to/scripts/dropbox_uploader.sh
-
-# Финальное сообщение
-echo "[$(date +"%Y-%m-%d %H:%M:%S")] All services started successfully."
+# Запуск всех сервисов через service_manager.py
+echo "Запуск всех сервисов через service_manager.py..."
+if python3 /opt/routerus/app/services/service_manager.py start_all; then
+    echo "Все сервисы успешно запущены."
+else
+    echo "Не удалось запустить все сервисы."
+    exit 1
+fi

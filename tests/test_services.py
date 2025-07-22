@@ -1,8 +1,11 @@
-from django.test import TestCase
-from app.services.wireguard import WireGuardService
-from app.services.shadowsocks import ShadowsocksService
-from app.services.xray import XrayService
 from unittest.mock import patch
+
+from django.test import TestCase
+
+from app.services.shadowsocks import ShadowsocksService
+from app.services.wireguard import WireGuardService
+from app.services.xray import XrayService
+
 
 class WireGuardServiceTest(TestCase):
     def setUp(self):
@@ -12,13 +15,14 @@ class WireGuardServiceTest(TestCase):
             server_ip="10.0.0.1",
             server_port=51820,
             peer_dns="1.1.1.1",
-            allowed_ips="0.0.0.0/0"
+            allowed_ips="0.0.0.0/0",
         )
 
     def test_create_config(self):
         with patch("builtins.open") as mock_open:
             self.wireguard.create_config()
             mock_open.assert_called_once()
+
 
 class ShadowsocksServiceTest(TestCase):
     def setUp(self):
@@ -27,13 +31,14 @@ class ShadowsocksServiceTest(TestCase):
             port=8388,
             password="test_password",
             method="aes-256-gcm",
-            timeout=300
+            timeout=300,
         )
 
     def test_create_config(self):
         with patch("json.dump") as mock_dump:
             self.shadowsocks.create_config()
             mock_dump.assert_called_once()
+
 
 class XrayServiceTest(TestCase):
     def setUp(self):

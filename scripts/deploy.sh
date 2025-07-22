@@ -2,8 +2,8 @@
 set -e
 
 # Параметры
-VENV_PATH=${VENV_PATH:-"/opt/wg-manager/venv"}
-LOG_FILE="/var/log/wg-manager/deploy.log"
+VENV_PATH=${VENV_PATH:-"/opt/routerus/venv"}
+LOG_FILE="/var/log/routerus/deploy.log"
 
 # Логирование
 exec >> $LOG_FILE 2>&1
@@ -35,7 +35,7 @@ else
 fi
 
 # Перезапуск приложения
-if systemctl restart wg-manager; then
+if systemctl restart routerus; then
     echo "Application restarted successfully."
 else
     echo "Error: Failed to restart application."

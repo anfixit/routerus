@@ -1,26 +1,33 @@
 #!/bin/bash
+# stop.sh: Скрипт для остановки всех сервисов
+
 set -e
 
-# Параметры
-LOG_FILE="/var/log/wg-manager/stop.log"
+# Чтение переменных из .env и экспорт
+if [ ! -f /opt/routerus/.env ]; then
+    echo ".env файл не найден. Убедитесь, что он существует в /opt/routerus/"
+    exit 1
+fi
+set -o allexport
+source /opt/routerus/.env
+set +o allexport
 
-exec >> $LOG_FILE 2>&1
-echo "[$(date +"%Y-%m-%d %H:%M:%S")] Stopping WireGuard Manager..."
+# Остановка всех сервисов через service_manager.py
+echo "Остановка всех сервисов через service_manager.py..."
+if python3 /opt/routerus/app/services/service_manager.py stop_all; then
+    echo "Все сервисы успешно остановлены."
+else
+    echo "Не удалось остановить все сервисы."
+    exit 1
+fi
 
-# 1. Остановка Shadowsocks
-echo "Stopping Shadowsocks..."
-pkill -f "ssserver" || echo "Shadowsocks already stopped."
-
-# 2. Остановка Xray
-echo "Stopping Xray..."
-pkill -f "xray" || echo "Xray already stopped."
-
-# 3. Остановка Gunicorn
-echo "Stopping Gunicorn..."
-pkill -f "gunicorn" || echo "Gunicorn already stopped."
-
-# 4. Остановка Nginx
-echo "Stopping Nginx..."
-sudo nginx -s quit || echo "Nginx already stopped."
-
-echo "[$(date +"%Y-%m-%d %H:%M:%S")] All services stopped successfully."
+# Остановка Nginx через systemctl
+if systemctl is-active --quiet nginx; then
+    echo "Остановка Nginx..."
+    if ! systemctl stop nginx; then
+        echo "Не удалось остановить Nginx"
+        exit 1
+    fi
+else
+    echo "Nginx не запущен."
+fi

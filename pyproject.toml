@@ -1,5 +1,5 @@
 [tool.poetry]
-name = "wg-manager"
+name = "routerus"
 version = "0.5.1"
 description = "VPN Management System with Shadowsocks and Xray Integration"
 authors = ["Anfikus <anfisa.kov@yahoo.com>"]
@@ -39,7 +39,22 @@ tzdata = "^2024.2"
 wireguard = "^1.0.0"
 xray = "^0.7.0"
 python-dotenv = "^1.0.0"
+pydantic-settings = "^2.6.1"
 
 [build-system]
 requires = ["poetry-core>=1.0.0"]
 build-backend = "poetry.core.masonry.api"
+
+[tool.poetry.dev-dependencies]
+black = "^23.3b0"
+flake8 = "^6.0.0"
+isort = "^5.10.1"
+pytest = "^7.2.0"
+pytest-mock = "^3.10.0"
+
+[tool.black]
+line-length = 88
+target-version = ['py39']
+
+[tool.isort]
+profile = "black"

@@ -1,5 +1,7 @@
 from django.test import TestCase
+
 from app.services.models import User, WireGuardConfig
+
 
 class UserModelTest(TestCase):
     def setUp(self):
@@ -12,6 +14,7 @@ class UserModelTest(TestCase):
     def test_user_string_representation(self):
         self.assertEqual(str(self.user), "testuser")
 
+
 class WireGuardConfigTest(TestCase):
     def setUp(self):
         self.user = User.objects.create(username="testuser", email="test@example.com")
@@ -20,7 +23,7 @@ class WireGuardConfigTest(TestCase):
             private_key="private_key_example",
             public_key="public_key_example",
             allowed_ips="0.0.0.0/0",
-            endpoint="test.endpoint:51820"
+            endpoint="test.endpoint:51820",
         )
 
     def test_config_creation(self):
