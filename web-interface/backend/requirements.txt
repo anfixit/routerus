@@ -1,0 +1,34 @@
+# 🚀 Routerus V2 Backend Requirements (Python 3.12)
+# Новейшие стабильные версии для максимальной производительности
+
+fastapi>=0.115.0
+uvicorn[standard]>=0.32.0
+pydantic>=2.10.0
+pydantic-settings>=2.6.0
+python-multipart>=0.0.12
+python-dotenv>=1.0.1
+httpx>=0.28.0
+aiofiles>=24.1.0
+
+# QR коды и изображения
+qrcode[pil]>=8.0
+pillow>=11.0.0
+
+# Система и мониторинг
+psutil>=6.1.0
+prometheus-client>=0.21.0
+
+# WebSockets и реальное время
+websockets>=13.1
+python-socketio>=5.11.0
+
+# База данных (легкая)
+aiosqlite>=0.20.0
+
+# Безопасность
+passlib[bcrypt]>=1.7.4
+python-jose[cryptography]>=3.3.0
+
+# Утилиты
+rich>=13.9.0
+typer>=0.15.0
