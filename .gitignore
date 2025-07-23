@@ -101,3 +101,5 @@ grafana-data/
 .DS_Store
 .DS_Store?
 deploy-config.sh
+deploy.sh
+deploy-config.sh
