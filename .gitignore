@@ -98,3 +98,6 @@ backup-*
 # Monitoring data
 prometheus-data/
 grafana-data/
+.DS_Store
+.DS_Store?
+deploy-config.sh
