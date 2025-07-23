@@ -1,81 +1,156 @@
-version: '3.8'
+version: "3.8"
+
+# Веб-интерфейс (Москва - 109.73.194.190)
+# Управление, мониторинг, дашборды
 
 services:
-  web:
-    container_name: web
-    restart: always
-    build:
-      context: .
-      dockerfile: ./docker/Dockerfile
-    command: python manage.py runserver 0.0.0.0:8000
+  # Nginx Reverse Proxy + SSL
+  nginx:
+    build: ./infrastructure/nginx
+    container_name: routerus-nginx
+    restart: unless-stopped
     ports:
-      - "8000:8000"
-    env_file:
-      - .env
-    depends_on:
-      - postgres
-      - shadowsocks
-      - xray
-    volumes:
-      - ./app:/app
-      - ./config:/config
-
-  postgres:
-    image: postgres:13
-    container_name: postgres
-    environment:
-      POSTGRES_DB: ${DB_NAME}
-      POSTGRES_USER: ${DB_USER}
-      POSTGRES_PASSWORD: ${DB_PASSWORD}
-    volumes:
-      - postgres_data:/var/lib/postgresql/data
-    networks:
-      - wg-network
-
-  promtail:
-    image: grafana/promtail:latest
-    container_name: promtail
-    volumes:
-      - ./config/monitoring/promtail-config.yml:/etc/promtail/promtail-config.yml:ro
-      - /var/log:/var/log
-    command: -config.file=/etc/promtail/promtail-config.yml
-    networks:
-      - wg-network
-
-  shadowsocks:
-    image: shadowsocks/shadowsocks-libev
-    container_name: shadowsocks
-    ports:
-      - "8388:8388"
-    environment:
-      - SERVER_ADDR=${SS_SERVER_ADDR}
-      - SERVER_PORT=${SS_SERVER_PORT}
-      - PASSWORD=${SS_PASSWORD}
-      - METHOD=${SS_METHOD}
-      - TIMEOUT=${SS_TIMEOUT}
-    volumes:
-      - ./config/shadowsocks:/config:ro
-    networks:
-      - wg-network
-
-  xray:
-    image: teddysun/xray
-    container_name: xray
-    ports:
+      - "80:80"
       - "443:443"
-    environment:
-      - XRAY_VLESS_NETWORK=${XRAY_VLESS_NETWORK}
-      - XRAY_VLESS_PATH=${XRAY_VLESS_PATH}
-      - XRAY_UUID=${XRAY_UUID}
-      - XRAY_LOG_LEVEL=${XRAY_LOG_LEVEL}
     volumes:
-      - ./config/xray:/config:ro
+      - ./infrastructure/nginx/web.conf:/etc/nginx/nginx.conf:ro
+      - ./infrastructure/nginx/ssl:/etc/ssl/certs:ro
+      - nginx-logs:/var/log/nginx
+    depends_on:
+      - backend
+      - frontend
+      - grafana
     networks:
-      - wg-network
+      - web-network
+
+  # FastAPI Backend (управление VPN серверами)
+  backend:
+    build: ./backend
+    container_name: routerus-backend
+    restart: unless-stopped
+    environment:
+      - MODE=WEB_INTERFACE
+      - DATABASE_URL=sqlite:///./data/routerus.db
+      - REDIS_URL=redis://redis:6379/0
+      - VPN_SERVERS=${VPN_SERVERS}
+      - VPN_API_SECRET=${VPN_API_SECRET}
+    volumes:
+      - backend-data:/app/data
+      - backend-logs:/app/logs
+    depends_on:
+      - redis
+    networks:
+      - web-network
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8000/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+
+  # React Frontend
+  frontend:
+    build: ./frontend
+    container_name: routerus-frontend
+    restart: unless-stopped
+    environment:
+      - REACT_APP_API_URL=https://${WEB_DOMAIN}/api
+      - REACT_APP_GRAFANA_URL=https://${WEB_DOMAIN}/grafana
+    networks:
+      - web-network
+
+  # Redis (для сессий и кеша)
+  redis:
+    image: redis:7-alpine
+    container_name: routerus-redis
+    restart: unless-stopped
+    volumes:
+      - redis-data:/data
+    networks:
+      - web-network
+    command: redis-server --appendonly yes --maxmemory 512mb --maxmemory-policy allkeys-lru
+
+  # Prometheus (сбор метрик со всех VPN серверов)
+  prometheus:
+    build: ./infrastructure/monitoring/prometheus
+    container_name: routerus-prometheus
+    restart: unless-stopped
+    ports:
+      - "9090:9090"
+    volumes:
+      - prometheus-data:/prometheus
+      - ./infrastructure/monitoring/prometheus/prometheus.web.yml:/etc/prometheus/prometheus.yml:ro
+    command:
+      - "--config.file=/etc/prometheus/prometheus.yml"
+      - "--storage.tsdb.path=/prometheus"
+      - "--storage.tsdb.retention.time=90d"
+      - "--web.enable-lifecycle"
+      - "--web.external-url=https://${WEB_DOMAIN}/prometheus/"
+    networks:
+      - web-network
+
+  # Grafana (дашборды и алерты)
+  grafana:
+    build: ./infrastructure/monitoring/grafana
+    container_name: routerus-grafana
+    restart: unless-stopped
+    environment:
+      - GF_SECURITY_ADMIN_PASSWORD=${GRAFANA_PASSWORD}
+      - GF_SERVER_ROOT_URL=https://${WEB_DOMAIN}/grafana/
+      - GF_SERVER_SERVE_FROM_SUB_PATH=true
+      - GF_INSTALL_PLUGINS=grafana-clock-panel,grafana-simple-json-datasource,grafana-worldmap-panel
+      - GF_SMTP_ENABLED=true
+      - GF_SMTP_HOST=${SMTP_HOST}
+      - GF_SMTP_USER=${SMTP_USER}
+      - GF_SMTP_PASSWORD=${SMTP_PASSWORD}
+    volumes:
+      - grafana-data:/var/lib/grafana
+    depends_on:
+      - prometheus
+    networks:
+      - web-network
+
+  # Telegram Bot (управление и алерты)
+  telegram-bot:
+    build: ./telegram-bot
+    container_name: routerus-telegram
+    restart: unless-stopped
+    environment:
+      - TELEGRAM_BOT_TOKEN=${TELEGRAM_BOT_TOKEN}
+      - ADMIN_CHAT_ID=${ADMIN_CHAT_ID}
+      - API_URL=http://backend:8000
+      - MODE=WEB_INTERFACE
+      - GRAFANA_URL=https://${WEB_DOMAIN}/grafana
+    volumes:
+      - bot-logs:/app/logs
+    depends_on:
+      - backend
+    networks:
+      - web-network
+
+  # PostgreSQL (для продакшена, опционально)
+  # postgres:
+  #   image: postgres:15-alpine
+  #   container_name: routerus-postgres
+  #   restart: unless-stopped
+  #   environment:
+  #     - POSTGRES_DB=${POSTGRES_DB}
+  #     - POSTGRES_USER=${POSTGRES_USER}
+  #     - POSTGRES_PASSWORD=${POSTGRES_PASSWORD}
+  #   volumes:
+  #     - postgres-data:/var/lib/postgresql/data
+  #   networks:
+  #     - web-network
 
 volumes:
-  postgres_data:
+  backend-data:
+  backend-logs:
+  redis-data:
+  prometheus-data:
+  grafana-data:
+  nginx-logs:
+  bot-logs:
+  # postgres-data:
 
 networks:
-  wg-network:
+  web-network:
     driver: bridge

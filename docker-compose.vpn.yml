@@ -1,0 +1,136 @@
+version: "3.8"
+
+# VPN сервер (Contabo - 178.18.243.123)
+# Только VPN, мониторинг и API для управления
+
+services:
+  # VPN Server (Xray)
+  vpn-server:
+    build: ./vpn-server
+    container_name: routerus-vpn
+    restart: unless-stopped
+    network_mode: host
+    cap_add:
+      - NET_ADMIN
+    volumes:
+      - vpn-configs:/etc/xray
+      - vpn-logs:/var/log/xray
+      - ./vpn-server/certs:/etc/ssl/xray:ro
+    environment:
+      - XRAY_LOG_LEVEL=warning
+      - SERVER_IP=${VPN_SERVER_IP}
+      - SERVER_PORT=443
+    healthcheck:
+      test: ["CMD", "/app/scripts/health-check.sh"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+
+  # Минимальный API для управления VPN
+  vpn-api:
+    build: ./backend
+    container_name: routerus-vpn-api
+    restart: unless-stopped
+    ports:
+      - "8080:8000"
+    environment:
+      - MODE=VPN_ONLY
+      - DATABASE_URL=sqlite:///./data/vpn.db
+      - VPN_SERVER_IP=${VPN_SERVER_IP}
+      - API_SECRET=${VPN_API_SECRET}
+      - WEB_INTERFACE_URL=${WEB_INTERFACE_URL}
+    volumes:
+      - vpn-api-data:/app/data
+      - vpn-configs:/app/vpn-configs
+      - vpn-logs:/app/logs
+    networks:
+      - vpn-network
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8000/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+
+  # Node Exporter для мониторинга
+  node-exporter:
+    image: prom/node-exporter:latest
+    container_name: routerus-node-exporter
+    restart: unless-stopped
+    ports:
+      - "9100:9100"
+    volumes:
+      - /proc:/host/proc:ro
+      - /sys:/host/sys:ro
+      - /:/rootfs:ro
+    command:
+      - "--path.procfs=/host/proc"
+      - "--path.sysfs=/host/sys"
+      - "--collector.filesystem.mount-points-exclude=^/(sys|proc|dev|host|etc)($$|/)"
+    networks:
+      - vpn-network
+
+  # Prometheus для локального мониторинга
+  prometheus:
+    build: ./infrastructure/monitoring/prometheus
+    container_name: routerus-vpn-prometheus
+    restart: unless-stopped
+    ports:
+      - "9090:9090"
+    volumes:
+      - prometheus-data:/prometheus
+      - ./infrastructure/monitoring/prometheus/prometheus.vpn.yml:/etc/prometheus/prometheus.yml:ro
+    command:
+      - "--config.file=/etc/prometheus/prometheus.yml"
+      - "--storage.tsdb.path=/prometheus"
+      - "--storage.tsdb.retention.time=7d"
+      - "--web.enable-lifecycle"
+    networks:
+      - vpn-network
+
+  # Nginx для API и мониторинга
+  nginx:
+    build: ./infrastructure/nginx
+    container_name: routerus-vpn-nginx
+    restart: unless-stopped
+    ports:
+      - "80:80"
+      - "443:443"
+    volumes:
+      - ./infrastructure/nginx/vpn.conf:/etc/nginx/nginx.conf:ro
+      - ./infrastructure/nginx/ssl:/etc/ssl/certs:ro
+      - nginx-logs:/var/log/nginx
+    depends_on:
+      - vpn-api
+      - prometheus
+    networks:
+      - vpn-network
+
+  # Телеграм бот для алертов
+  telegram-bot:
+    build: ./telegram-bot
+    container_name: routerus-vpn-telegram
+    restart: unless-stopped
+    environment:
+      - TELEGRAM_BOT_TOKEN=${TELEGRAM_BOT_TOKEN}
+      - ADMIN_CHAT_ID=${ADMIN_CHAT_ID}
+      - API_URL=http://vpn-api:8000
+      - MODE=VPN_SERVER
+      - SERVER_NAME=Contabo-VPN
+    volumes:
+      - bot-logs:/app/logs
+    depends_on:
+      - vpn-api
+    networks:
+      - vpn-network
+
+volumes:
+  vpn-configs:
+  vpn-logs:
+  vpn-api-data:
+  prometheus-data:
+  nginx-logs:
+  bot-logs:
+
+networks:
+  vpn-network:
+    driver: bridge
