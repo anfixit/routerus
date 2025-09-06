@@ -30,6 +30,34 @@ EOF
     echo -e "${NC}"
 }
 
+# Проверка и настройка системы
+check_system_requirements() {
+    echo -e "${BLUE}Проверка системных требований...${NC}"
+
+    # Проверка IP forwarding
+    if [[ $(cat /proc/sys/net/ipv4/ip_forward) != "1" ]]; then
+        echo -e "${YELLOW}IP forwarding отключен. Требуются права root для включения.${NC}"
+        if [[ $EUID -eq 0 ]]; then
+            echo 'net.ipv4.ip_forward=1' >> /etc/sysctl.conf
+            sysctl -p > /dev/null 2>&1
+            echo -e "${GREEN}✓ IP forwarding включен${NC}"
+        else
+            echo -e "${RED}Запустите: sudo sysctl net.ipv4.ip_forward=1${NC}"
+            echo -e "${RED}Или запустите setup.sh с sudo${NC}"
+            exit 1
+        fi
+    else
+        echo -e "${GREEN}✓ IP forwarding уже включен${NC}"
+    fi
+
+    # Проверка Docker
+    if ! command -v docker &> /dev/null; then
+        echo -e "${RED}Docker не установлен. Установите Docker и повторите попытку.${NC}"
+        exit 1
+    fi
+    echo -e "${GREEN}✓ Docker найден${NC}"
+}
+
 # Проверка наличия .env
 check_env_exists() {
     if [[ -f "$ENV_FILE" ]]; then
@@ -473,6 +501,7 @@ show_summary() {
 # Основная функция
 main() {
     show_logo
+    check_system_requirements
 
     # Проверяем .env
     env_status=1

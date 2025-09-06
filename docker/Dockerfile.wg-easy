@@ -47,7 +47,6 @@ RUN apk add --no-cache --virtual .build-deps \
     && apk del .build-deps
 
 # КЛЮЧЕВОЕ ИСПРАВЛЕНИЕ: Подмена стандартного WireGuard на AmneziaWG
-# Это заставляет wg-easy использовать AWG вместо обычного WG
 RUN which awg-quick && which awg \
     && ln -sf $(which awg-quick) /usr/bin/wg-quick \
     && ln -sf $(which awg) /usr/bin/wg
@@ -67,7 +66,7 @@ RUN mkdir -p /etc/wireguard \
     && mkdir -p /app/config \
     && chown -R wg-easy:wg-easy /etc/wireguard /app
 
-# Создание env.sh с помощью echo
+# Создание env.sh
 RUN echo '#!/bin/bash' > /app/config/env.sh \
     && echo 'export SERVER_ENDPOINT=${SERVER_ENDPOINT:-"localhost"}' >> /app/config/env.sh \
     && echo 'export WG_PORT=${WG_PORT:-51820}' >> /app/config/env.sh \
@@ -83,7 +82,7 @@ RUN echo '#!/bin/bash' > /app/config/env.sh \
     && echo 'export AMNEZIA_H3=${AMNEZIA_H3:-1122334455}' >> /app/config/env.sh \
     && echo 'export AMNEZIA_H4=${AMNEZIA_H4:-5544332211}' >> /app/config/env.sh
 
-# Создание init-amnezia.sh с помощью echo
+# Создание init-amnezia.sh
 RUN echo '#!/bin/bash' > /app/scripts/init-amnezia.sh \
     && echo 'set -e' >> /app/scripts/init-amnezia.sh \
     && echo 'WG_CONFIG="/etc/wireguard/wg0.conf"' >> /app/scripts/init-amnezia.sh \
@@ -114,16 +113,16 @@ RUN echo '#!/bin/bash' > /app/scripts/init-amnezia.sh \
     && echo 'fi' >> /app/scripts/init-amnezia.sh \
     && echo 'echo "AmneziaWG сервер инициализирован"' >> /app/scripts/init-amnezia.sh
 
-# Создание start.sh с помощью echo
+# ИСПРАВЛЕННЫЙ start.sh БЕЗ проблемной строки IP forwarding
 RUN echo '#!/bin/bash' > /app/start.sh \
     && echo 'set -e' >> /app/start.sh \
     && echo 'echo "Запуск RouteRus VPN с поддержкой AmneziaWG..."' >> /app/start.sh \
     && echo 'source /app/config/env.sh' >> /app/start.sh \
     && echo 'bash /app/scripts/init-amnezia.sh' >> /app/start.sh \
     && echo 'chown -R wg-easy:wg-easy /etc/wireguard' >> /app/start.sh \
-    && echo 'echo 1 > /proc/sys/net/ipv4/ip_forward' >> /app/start.sh \
+    && echo 'echo "IP forwarding должен быть включен на хосте"' >> /app/start.sh \
     && echo 'echo "Запуск wg-easy сервера..."' >> /app/start.sh \
-    && echo 'exec node server.js' >> /app/start.sh
+    && echo 'exec node src/index.js' >> /app/start.sh
 
 # Установка прав на выполнение
 RUN chmod +x /app/scripts/init-amnezia.sh \
