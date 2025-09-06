@@ -1,0 +1,14 @@
+{
+  "ProxyBook": {
+    "wireguard": ["udp", "wg-easy:51820"]
+  },
+  "BindAddr": [":8443", ":8080"],
+  "BypassUID": ["BYPASS_UID_PLACEHOLDER"],
+  "RedirAddr": "www.google.com:443",
+  "PrivateKey": "CLOAK_PRIVATE_KEY_PLACEHOLDER",
+  "AdminUID": "ADMIN_UID_PLACEHOLDER",
+  "DatabasePath": "/opt/cloak/data/userinfo.db",
+  "StreamTimeout": 300,
+  "KeepAlive": 15,
+  "CncAddr": "127.0.0.1:8888"
+}

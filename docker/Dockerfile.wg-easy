@@ -1,0 +1,342 @@
+# WireGuard Easy с поддержкой AmneziaWG обфускации
+FROM node:18-alpine AS build
+
+# Установка зависимостей для сборки
+RUN apk add --no-cache \
+    git \
+    python3 \
+    make \
+    g++ \
+    linux-headers
+
+# Клонирование и сборка wg-easy
+WORKDIR /app
+RUN git clone https://github.com/wg-easy/wg-easy.git .
+RUN npm ci --only=production
+
+# Основной образ
+FROM alpine:latest
+
+# Установка зависимостей
+RUN apk add --no-cache \
+    nodejs \
+    npm \
+    wireguard-tools \
+    iptables \
+    ip6tables \
+    curl \
+    bash \
+    jq \
+    qrencode \
+    openssl \
+    sudo \
+    dumb-init
+
+# Установка AmneziaWG
+RUN apk add --no-cache --virtual .build-deps \
+    git \
+    build-base \
+    linux-headers \
+    libmnl-dev \
+    && git clone https://github.com/amnezia-vpn/amneziawg-tools.git /tmp/amneziawg \
+    && cd /tmp/amneziawg/src \
+    && make \
+    && make install \
+    && cd / \
+    && rm -rf /tmp/amneziawg \
+    && apk del .build-deps
+
+# Копирование wg-easy
+COPY --from=build /app /app
+WORKDIR /app
+
+# Создание пользователя
+RUN addgroup -g 1000 wg-easy \
+    && adduser -u 1000 -G wg-easy -s /bin/bash -D wg-easy \
+    && echo "wg-easy ALL=(ALL) NOPASSWD: ALL" > /etc/sudoers.d/wg-easy
+
+# Создание директорий
+RUN mkdir -p /etc/wireguard \
+    && mkdir -p /app/scripts \
+    && mkdir -p /app/templates \
+    && mkdir -p /app/config \
+    && chown -R wg-easy:wg-easy /etc/wireguard /app
+
+# Копирование скриптов обфускации
+COPY scripts/config-generator.sh /app/scripts/
+COPY scripts/amnezia-config.sh /app/scripts/
+COPY templates/ /app/templates/
+COPY config/ /app/config/
+
+# Создание скрипта генератора конфигов с обфускацией
+RUN cat > /app/scripts/config-generator.sh << 'EOF'
+#!/bin/bash
+
+# Генератор конфигов с поддержкой AmneziaWG обфускации
+
+set -e
+
+TYPE=${1:-standard}
+CLIENT_NAME=${2:-"client-$(date +%s)"}
+OUTPUT_DIR="/etc/wireguard"
+
+# Загружаем переменные окружения
+source /app/config/env.sh
+
+# Функция генерации ключей
+generate_keys() {
+    local private_key public_key
+    private_key=$(wg genkey)
+    public_key=$(echo "$private_key" | wg pubkey)
+    echo "$private_key:$public_key"
+}
+
+# Функция создания конфига с обфускацией
+create_obfuscated_config() {
+    local client_name=$1
+    local type=$2
+    local template_file="/app/templates/client-${type}.conf"
+    local output_file="$OUTPUT_DIR/${client_name}.conf"
+
+    # Генерируем ключи клиента
+    local keys=$(generate_keys)
+    local client_private_key=$(echo "$keys" | cut -d':' -f1)
+    local client_public_key=$(echo "$keys" | cut -d':' -f2)
+
+    # Получаем следующий доступный IP
+    local client_ip=$(get_next_ip)
+
+    # Создаем конфиг на основе шаблона
+    if [[ -f "$template_file" ]]; then
+        cp "$template_file" "$output_file"
+    else
+        cp "/app/templates/client-obfuscated.conf" "$output_file"
+    fi
+
+    # Подставляем переменные
+    sed -i "s/{{CLIENT_PRIVATE_KEY}}/$client_private_key/g" "$output_file"
+    sed -i "s/{{CLIENT_IP}}/$client_ip/g" "$output_file"
+    sed -i "s/{{SERVER_ENDPOINT}}/$SERVER_ENDPOINT/g" "$output_file"
+    sed -i "s/{{SERVER_PORT}}/$WG_PORT/g" "$output_file"
+    sed -i "s/{{SERVER_PUBLIC_KEY}}/$SERVER_PUBLIC_KEY/g" "$output_file"
+    sed -i "s/{{DNS_SERVERS}}/$ADGUARD_DNS_IP1,$ADGUARD_DNS_IP2/g" "$output_file"
+
+    # Параметры обфускации AmneziaWG
+    sed -i "s/{{AMNEZIA_JC}}/$AMNEZIA_JC/g" "$output_file"
+    sed -i "s/{{AMNEZIA_JMIN}}/$AMNEZIA_JMIN/g" "$output_file"
+    sed -i "s/{{AMNEZIA_JMAX}}/$AMNEZIA_JMAX/g" "$output_file"
+    sed -i "s/{{AMNEZIA_S1}}/$AMNEZIA_S1/g" "$output_file"
+    sed -i "s/{{AMNEZIA_S2}}/$AMNEZIA_S2/g" "$output_file"
+    sed -i "s/{{AMNEZIA_H1}}/$AMNEZIA_H1/g" "$output_file"
+    sed -i "s/{{AMNEZIA_H2}}/$AMNEZIA_H2/g" "$output_file"
+    sed -i "s/{{AMNEZIA_H3}}/$AMNEZIA_H3/g" "$output_file"
+    sed -i "s/{{AMNEZIA_H4}}/$AMNEZIA_H4/g" "$output_file"
+
+    # Добавляем клиента на сервер
+    add_client_to_server "$client_name" "$client_public_key" "$client_ip"
+
+    echo "Конфигурация создана: $output_file"
+    echo "Публичный ключ клиента: $client_public_key"
+
+    # Генерируем QR код
+    qrencode -t ansiutf8 < "$output_file"
+}
+
+# Функция получения следующего IP
+get_next_ip() {
+    local base_ip="10.8.0"
+    local used_ips=$(grep -h "Address = " /etc/wireguard/*.conf 2>/dev/null | cut -d'=' -f2 | cut -d'/' -f1 | sort -V || true)
+
+    for i in {2..254}; do
+        local test_ip="$base_ip.$i"
+        if ! echo "$used_ips" | grep -q "$test_ip"; then
+            echo "$test_ip/32"
+            return
+        fi
+    done
+
+    echo "10.8.0.100/32"  # fallback
+}
+
+# Функция добавления клиента на сервер
+add_client_to_server() {
+    local client_name=$1
+    local client_public_key=$2
+    local client_ip=$3
+
+    # Добавляем peer в серверную конфигурацию
+    local server_config="/etc/wireguard/wg0.conf"
+
+    if [[ -f "$server_config" ]]; then
+        cat >> "$server_config" << EOF
+
+# Client: $client_name
+[Peer]
+PublicKey = $client_public_key
+AllowedIPs = $client_ip
+EOF
+        # Перезагружаем WireGuard
+        wg syncconf wg0 <(wg-quick strip wg0) || true
+    fi
+}
+
+# Основная функция
+main() {
+    case $TYPE in
+        mobile)
+            echo "Создание мобильной конфигурации для $CLIENT_NAME"
+            create_obfuscated_config "$CLIENT_NAME" "mobile"
+            ;;
+        router)
+            echo "Создание конфигурации для роутера $CLIENT_NAME"
+            create_obfuscated_config "$CLIENT_NAME" "router"
+            ;;
+        desktop)
+            echo "Создание desktop конфигурации для $CLIENT_NAME"
+            create_obfuscated_config "$CLIENT_NAME" "desktop"
+            ;;
+        https)
+            echo "Создание HTTPS-маскированной конфигурации для $CLIENT_NAME"
+            create_obfuscated_config "$CLIENT_NAME" "https-masked"
+            ;;
+        *)
+            echo "Создание стандартной обфускованной конфигурации для $CLIENT_NAME"
+            create_obfuscated_config "$CLIENT_NAME" "obfuscated"
+            ;;
+    esac
+}
+
+main "$@"
+EOF
+
+# Создание скрипта настройки окружения
+RUN cat > /app/config/env.sh << 'EOF'
+#!/bin/bash
+
+# Загрузка переменных окружения с значениями по умолчанию
+
+export SERVER_ENDPOINT=${SERVER_ENDPOINT:-"localhost"}
+export WG_PORT=${WG_PORT:-51820}
+export ADGUARD_DNS_IP1=${ADGUARD_DNS_IP1:-"94.140.14.14"}
+export ADGUARD_DNS_IP2=${ADGUARD_DNS_IP2:-"94.140.15.15"}
+
+# Параметры обфускации AmneziaWG
+export AMNEZIA_JC=${AMNEZIA_JC:-5}
+export AMNEZIA_JMIN=${AMNEZIA_JMIN:-100}
+export AMNEZIA_JMAX=${AMNEZIA_JMAX:-1000}
+export AMNEZIA_S1=${AMNEZIA_S1:-86}
+export AMNEZIA_S2=${AMNEZIA_S2:-92}
+export AMNEZIA_H1=${AMNEZIA_H1:-1234567890}
+export AMNEZIA_H2=${AMNEZIA_H2:-9876543210}
+export AMNEZIA_H3=${AMNEZIA_H3:-1122334455}
+export AMNEZIA_H4=${AMNEZIA_H4:-5544332211}
+
+# Получение публичного ключа сервера
+if [[ -f "/etc/wireguard/server_public.key" ]]; then
+    export SERVER_PUBLIC_KEY=$(cat /etc/wireguard/server_public.key)
+elif [[ -f "/etc/wireguard/wg0.conf" ]]; then
+    export SERVER_PUBLIC_KEY=$(grep "^# PublicKey" /etc/wireguard/wg0.conf | cut -d'=' -f2 | xargs)
+else
+    export SERVER_PUBLIC_KEY="PLACEHOLDER_PUBLIC_KEY"
+fi
+EOF
+
+# Создание скрипта инициализации с обфускацией
+RUN cat > /app/scripts/init-amnezia.sh << 'EOF'
+#!/bin/bash
+
+# Инициализация AmneziaWG сервера
+
+set -e
+
+WG_CONFIG="/etc/wireguard/wg0.conf"
+
+# Генерация ключей сервера если их нет
+if [[ ! -f "/etc/wireguard/server_private.key" ]]; then
+    echo "Генерация ключей сервера..."
+    wg genkey > /etc/wireguard/server_private.key
+    cat /etc/wireguard/server_private.key | wg pubkey > /etc/wireguard/server_public.key
+    chmod 600 /etc/wireguard/server_private.key
+fi
+
+# Создание серверной конфигурации с поддержкой AmneziaWG
+if [[ ! -f "$WG_CONFIG" ]]; then
+    echo "Создание серверной конфигурации..."
+    cat > "$WG_CONFIG" << EOC
+[Interface]
+PrivateKey = $(cat /etc/wireguard/server_private.key)
+Address = 10.8.0.1/24
+ListenPort = ${WG_PORT:-51820}
+PostUp = iptables -A FORWARD -i %i -j ACCEPT; iptables -A FORWARD -o %i -j ACCEPT; iptables -t nat -A POSTROUTING -o eth+ -j MASQUERADE
+PostDown = iptables -D FORWARD -i %i -j ACCEPT; iptables -D FORWARD -o %i -j ACCEPT; iptables -t nat -D POSTROUTING -o eth+ -j MASQUERADE
+
+# Параметры обфускации AmneziaWG
+Jc = ${AMNEZIA_JC:-5}
+Jmin = ${AMNEZIA_JMIN:-100}
+Jmax = ${AMNEZIA_JMAX:-1000}
+S1 = ${AMNEZIA_S1:-86}
+S2 = ${AMNEZIA_S2:-92}
+H1 = ${AMNEZIA_H1:-1234567890}
+H2 = ${AMNEZIA_H2:-9876543210}
+H3 = ${AMNEZIA_H3:-1122334455}
+H4 = ${AMNEZIA_H4:-5544332211}
+
+# PublicKey = $(cat /etc/wireguard/server_public.key)
+EOC
+fi
+
+echo "AmneziaWG сервер инициализирован"
+EOF
+
+# Создание wrapper скрипта для wg-easy
+RUN cat > /app/start.sh << 'EOF'
+#!/bin/bash
+
+# Wrapper для запуска wg-easy с поддержкой AmneziaWG
+
+set -e
+
+echo "Запуск WireGuard Easy с поддержкой AmneziaWG..."
+
+# Инициализация AmneziaWG
+source /app/config/env.sh
+/app/scripts/init-amnezia.sh
+
+# Установка прав
+chown -R wg-easy:wg-easy /etc/wireguard
+
+# Включение IP forwarding
+echo 1 > /proc/sys/net/ipv4/ip_forward
+
+# Запуск оригинального wg-easy
+exec node server.js
+EOF
+
+# Делаем скрипты исполняемыми
+RUN chmod +x /app/scripts/*.sh \
+    && chmod +x /app/config/env.sh \
+    && chmod +x /app/start.sh
+
+# Создание алиасов для удобства
+RUN echo 'alias wg-gen="/app/scripts/config-generator.sh"' >> /home/wg-easy/.bashrc \
+    && echo 'alias wg-mobile="/app/scripts/config-generator.sh mobile"' >> /home/wg-easy/.bashrc \
+    && echo 'alias wg-router="/app/scripts/config-generator.sh router"' >> /home/wg-easy/.bashrc \
+    && echo 'alias wg-desktop="/app/scripts/config-generator.sh desktop"' >> /home/wg-easy/.bashrc
+
+# Переключение на пользователя
+USER wg-easy
+
+# Экспорт портов
+EXPOSE 51820/udp 51821/tcp
+
+# Volumes
+VOLUME ["/etc/wireguard"]
+
+# Точка входа
+ENTRYPOINT ["/usr/bin/dumb-init", "--"]
+CMD ["/app/start.sh"]
+
+# Метаданные
+LABEL maintainer="WireGuard Obfuscation Team"
+LABEL description="WireGuard Easy with AmneziaWG obfuscation support"
+LABEL version="1.0"

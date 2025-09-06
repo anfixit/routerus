@@ -1,0 +1,145 @@
+version: "3.8"
+
+services:
+  # Основной WireGuard сервер с wg-easy интерфейсом
+  wg-easy:
+    build:
+      context: .
+      dockerfile: docker/Dockerfile.wg-easy
+    container_name: wg-easy-obfuscated
+    environment:
+      # Основные настройки
+      - WG_HOST=${SERVER_ENDPOINT:-localhost}
+      - PASSWORD=${WG_EASY_PASSWORD:-changeme}
+      - WG_PORT=${WG_PORT:-51820}
+      - WG_DEFAULT_ADDRESS=${WG_SUBNET:-10.8.0.x}
+      - WG_DEFAULT_DNS=${ADGUARD_DNS_IP1:-94.140.14.14},${ADGUARD_DNS_IP2:-94.140.15.15}
+      - WG_ALLOWED_IPS=${WG_ALLOWED_IPS:-0.0.0.0/0}
+      - WG_PERSISTENT_KEEPALIVE=${WG_KEEPALIVE:-25}
+      - WG_MTU=${WG_MTU:-1280}
+
+      # Параметры обфускации AmneziaWG
+      - AMNEZIA_JC=${JC:-5}
+      - AMNEZIA_JMIN=${JMIN:-100}
+      - AMNEZIA_JMAX=${JMAX:-1000}
+      - AMNEZIA_S1=${S1:-86}
+      - AMNEZIA_S2=${S2:-92}
+      - AMNEZIA_H1=${H1:-1234567890}
+      - AMNEZIA_H2=${H2:-9876543210}
+      - AMNEZIA_H3=${H3:-1122334455}
+      - AMNEZIA_H4=${H4:-5544332211}
+
+      # DNS настройки
+      - ADGUARD_DNS_HTTPS=${ADGUARD_DNS_HTTPS:-https://dns.adguard-dns.com/dns-query}
+      - ADGUARD_DNS_TLS=${ADGUARD_DNS_TLS:-tls://dns.adguard-dns.com}
+
+      # Дополнительные настройки
+      - LANG=ru
+      - UI_TRAFFIC_STATS=true
+      - UI_CHART_TYPE=2
+      - WG_ENABLE_ONE_TIME_LINKS=true
+
+    volumes:
+      - wg_data:/etc/wireguard
+      - ./templates:/app/templates:ro
+      - ./scripts:/app/scripts:ro
+    ports:
+      - "${WEB_PORT:-51821}:51821/tcp" # Веб-интерфейс
+      - "${WG_PORT:-51820}:51820/udp" # WireGuard основной
+      - "443:51820/udp" # Маскировка под HTTPS
+      - "53:51820/udp" # Маскировка под DNS
+      - "993:51820/udp" # Маскировка под IMAPS
+    cap_add:
+      - NET_ADMIN
+      - SYS_MODULE
+    sysctls:
+      - net.ipv4.ip_forward=1
+      - net.ipv4.conf.all.src_valid_mark=1
+    restart: unless-stopped
+    networks:
+      - wg_network
+
+  # Cloak для дополнительной обфускации (опционально)
+  cloak:
+    image: cbeuw/cloak:latest
+    container_name: cloak-obfuscator
+    environment:
+      - CLOAK_ENABLED=${CLOAK_ENABLED:-false}
+    volumes:
+      - ./docker/cloak/config-template.json:/opt/cloak/config.json:ro
+      - cloak_data:/opt/cloak/data
+    ports:
+      - "8443:8443/tcp" # Cloak HTTPS порт
+      - "8080:8080/tcp" # Cloak HTTP порт
+    depends_on:
+      - wg-easy
+    restart: unless-stopped
+    networks:
+      - wg_network
+    profiles:
+      - cloak # Запускается только если включен профиль
+
+  # Веб-статистика и мониторинг
+  stats:
+    image: php:8.2-apache
+    container_name: wg-stats
+    volumes:
+      - ./web:/var/www/html:ro
+      - wg_data:/var/wireguard:ro
+    ports:
+      - "${STATS_PORT:-8080}:80/tcp"
+    environment:
+      - WG_CONFIG_PATH=/var/wireguard
+    depends_on:
+      - wg-easy
+    restart: unless-stopped
+    networks:
+      - wg_network
+
+  # Автоматический генератор конфигов с обфускацией
+  config-generator:
+    build:
+      context: .
+      dockerfile: docker/Dockerfile.config-generator
+    container_name: wg-config-generator
+    volumes:
+      - wg_data:/etc/wireguard
+      - ./templates:/app/templates:ro
+      - generated_configs:/app/output
+    environment:
+      # Наследуем все переменные обфускации
+      - SERVER_ENDPOINT=${SERVER_ENDPOINT}
+      - WG_PORT=${WG_PORT:-51820}
+      - AMNEZIA_JC=${JC:-5}
+      - AMNEZIA_JMIN=${JMIN:-100}
+      - AMNEZIA_JMAX=${JMAX:-1000}
+      - AMNEZIA_S1=${S1:-86}
+      - AMNEZIA_S2=${S2:-92}
+      - AMNEZIA_H1=${H1:-1234567890}
+      - AMNEZIA_H2=${H2:-9876543210}
+      - AMNEZIA_H3=${H3:-1122334455}
+      - AMNEZIA_H4=${H4:-5544332211}
+      - ADGUARD_DNS_IP1=${ADGUARD_DNS_IP1:-94.140.14.14}
+      - ADGUARD_DNS_IP2=${ADGUARD_DNS_IP2:-94.140.15.15}
+    depends_on:
+      - wg-easy
+    restart: "no" # Запускается по требованию
+    networks:
+      - wg_network
+    profiles:
+      - generator
+
+volumes:
+  wg_data:
+    driver: local
+  cloak_data:
+    driver: local
+  generated_configs:
+    driver: local
+
+networks:
+  wg_network:
+    driver: bridge
+    ipam:
+      config:
+        - subnet: 172.20.0.0/16

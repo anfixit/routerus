@@ -1,0 +1,290 @@
+# Генератор конфигураций WireGuard с поддержкой обфускации
+FROM alpine:latest
+
+# Установка зависимостей
+RUN apk add --no-cache \
+    bash \
+    wireguard-tools \
+    qrencode \
+    openssl \
+    jq \
+    curl \
+    sed \
+    grep \
+    coreutils
+
+# Создание рабочей директории
+WORKDIR /app
+
+# Создание пользователя
+RUN addgroup -g 1000 generator \
+    && adduser -u 1000 -G generator -s /bin/bash -D generator
+
+# Создание основного скрипта генератора
+RUN cat > /app/generator.sh << 'EOF'
+#!/bin/bash
+
+# Универсальный генератор конфигураций WireGuard с обфускацией
+
+set -e
+
+# Переменные
+TYPE=${1:-"obfuscated"}
+CLIENT_NAME=${2:-"client-$(date +%s)"}
+OUTPUT_DIR=${3:-"/app/output"}
+TEMPLATES_DIR="/app/templates"
+
+# Цвета
+RED='\033[0;31m'
+GREEN='\033[0;32m'
+YELLOW='\033[1;33m'
+BLUE='\033[0;34m'
+NC='\033[0m'
+
+echo -e "${BLUE}WireGuard Config Generator${NC}"
+echo -e "${YELLOW}Тип: $TYPE, Клиент: $CLIENT_NAME${NC}"
+
+# Функция генерации ключей
+generate_keys() {
+    local private_key public_key
+    private_key=$(wg genkey)
+    public_key=$(echo "$private_key" | wg pubkey)
+    echo "$private_key:$public_key"
+}
+
+# Функция получения следующего IP
+get_next_ip() {
+    local base_ip="10.8.0"
+    local used_ips=""
+
+    # Пытаемся прочитать используемые IP из существующих конфигов
+    if [[ -d "/etc/wireguard" ]]; then
+        used_ips=$(find /etc/wireguard -name "*.conf" -exec grep -h "Address = " {} \; 2>/dev/null | cut -d'=' -f2 | cut -d'/' -f1 | sort -V || true)
+    fi
+
+    # Поиск свободного IP
+    for i in {2..254}; do
+        local test_ip="$base_ip.$i"
+        if ! echo "$used_ips" | grep -q "$test_ip"; then
+            echo "$test_ip/32"
+            return
+        fi
+    done
+
+    # Fallback IP
+    echo "10.8.0.$((RANDOM % 200 + 50))/32"
+}
+
+# Функция подстановки переменных
+substitute_variables() {
+    local config_file=$1
+    local client_private_key=$2
+    local client_ip=$3
+
+    # Базовые переменные
+    sed -i "s|{{CLIENT_PRIVATE_KEY}}|$client_private_key|g" "$config_file"
+    sed -i "s|{{CLIENT_IP}}|$client_ip|g" "$config_file"
+    sed -i "s|{{GENERATION_DATE}}|$(date)|g" "$config_file"
+
+    # Серверные переменные
+    sed -i "s|{{SERVER_ENDPOINT}}|${SERVER_ENDPOINT:-localhost}|g" "$config_file"
+    sed -i "s|{{SERVER_PORT}}|${WG_PORT:-51820}|g" "$config_file"
+    sed -i "s|{{SERVER_PUBLIC_KEY}}|${SERVER_PUBLIC_KEY:-PLACEHOLDER}|g" "$config_file"
+
+    # DNS серверы
+    local dns_servers="${ADGUARD_DNS_IP1:-94.140.14.14},${ADGUARD_DNS_IP2:-94.140.15.15}"
+    sed -i "s|{{DNS_SERVERS}}|$dns_servers|g" "$config_file"
+
+    # Параметры обфускации AmneziaWG
+    sed -i "s|{{AMNEZIA_JC}}|${AMNEZIA_JC:-5}|g" "$config_file"
+    sed -i "s|{{AMNEZIA_JMIN}}|${AMNEZIA_JMIN:-100}|g" "$config_file"
+    sed -i "s|{{AMNEZIA_JMAX}}|${AMNEZIA_JMAX:-1000}|g" "$config_file"
+    sed -i "s|{{AMNEZIA_S1}}|${AMNEZIA_S1:-86}|g" "$config_file"
+    sed -i "s|{{AMNEZIA_S2}}|${AMNEZIA_S2:-92}|g" "$config_file"
+    sed -i "s|{{AMNEZIA_H1}}|${AMNEZIA_H1:-1234567890}|g" "$config_file"
+    sed -i "s|{{AMNEZIA_H2}}|${AMNEZIA_H2:-9876543210}|g" "$config_file"
+    sed -i "s|{{AMNEZIA_H3}}|${AMNEZIA_H3:-1122334455}|g" "$config_file"
+    sed -i "s|{{AMNEZIA_H4}}|${AMNEZIA_H4:-5544332211}|g" "$config_file"
+}
+
+# Функция создания конфигурации
+create_config() {
+    local type=$1
+    local client_name=$2
+
+    # Определяем шаблон
+    local template_file=""
+    case $type in
+        mobile)
+            template_file="$TEMPLATES_DIR/client-mobile.conf"
+            ;;
+        router)
+            template_file="$TEMPLATES_DIR/client-router.conf"
+            ;;
+        desktop)
+            template_file="$TEMPLATES_DIR/client-desktop.conf"
+            ;;
+        https|https-masked)
+            template_file="$TEMPLATES_DIR/client-https-masked.conf"
+            ;;
+        obfuscated|*)
+            template_file="$TEMPLATES_DIR/client-obfuscated.conf"
+            ;;
+    esac
+
+    # Проверяем наличие шаблона
+    if [[ ! -f "$template_file" ]]; then
+        echo -e "${RED}Ошибка: шаблон $template_file не найден${NC}"
+        return 1
+    fi
+
+    # Генерируем ключи и IP
+    local keys=$(generate_keys)
+    local client_private_key=$(echo "$keys" | cut -d':' -f1)
+    local client_public_key=$(echo "$keys" | cut -d':' -f2)
+    local client_ip=$(get_next_ip)
+
+    # Создаем выходную директорию
+    mkdir -p "$OUTPUT_DIR"
+
+    # Копируем шаблон
+    local output_file="$OUTPUT_DIR/${client_name}.conf"
+    cp "$template_file" "$output_file"
+
+    # Подставляем переменные
+    substitute_variables "$output_file" "$client_private_key" "$client_ip"
+
+    # Создаем JSON с информацией о клиенте
+    cat > "$OUTPUT_DIR/${client_name}.json" << EOJ
+{
+    "name": "$client_name",
+    "type": "$type",
+    "private_key": "$client_private_key",
+    "public_key": "$client_public_key",
+    "ip": "$client_ip",
+    "created": "$(date -Iseconds)",
+    "config_file": "${client_name}.conf"
+}
+EOJ
+
+    # Генерируем QR код
+    if command -v qrencode &> /dev/null; then
+        qrencode -t PNG -o "$OUTPUT_DIR/${client_name}.png" < "$output_file"
+        qrencode -t ANSIUTF8 < "$output_file" > "$OUTPUT_DIR/${client_name}_qr.txt"
+    fi
+
+    echo -e "${GREEN}Конфигурация создана:${NC}"
+    echo -e "  Файл: $output_file"
+    echo -e "  Тип: $type"
+    echo -e "  IP: $client_ip"
+    echo -e "  Публичный ключ: $client_public_key"
+
+    # Показываем QR код в терминале
+    if [[ -f "$OUTPUT_DIR/${client_name}_qr.txt" ]]; then
+        echo -e "${YELLOW}QR код:${NC}"
+        cat "$OUTPUT_DIR/${client_name}_qr.txt"
+    fi
+
+    return 0
+}
+
+# Функция показа справки
+show_help() {
+    echo -e "${CYAN}Использование: generator.sh [тип] [имя_клиента] [директория_вывода]${NC}"
+    echo ""
+    echo -e "${YELLOW}Доступные типы конфигураций:${NC}"
+    echo -e "  ${GREEN}mobile${NC}      - Мобильные устройства (Android/iOS)"
+    echo -e "  ${GREEN}router${NC}      - Роутеры (Keenetic, OpenWrt, ASUS)"
+    echo -e "  ${GREEN}desktop${NC}     - Настольные ПК (Windows, macOS, Linux)"
+    echo -e "  ${GREEN}https${NC}       - Маскировка под HTTPS (порт 443)"
+    echo -e "  ${GREEN}obfuscated${NC}  - Стандартная обфускация (по умолчанию)"
+    echo ""
+    echo -e "${YELLOW}Примеры:${NC}"
+    echo -e "  generator.sh mobile phone1"
+    echo -e "  generator.sh router keenetic-home"
+    echo -e "  generator.sh desktop laptop-work"
+    echo -e "  generator.sh https bypass-firewall"
+}
+
+# Основная логика
+main() {
+    if [[ "$1" == "--help" || "$1" == "-h" ]]; then
+        show_help
+        exit 0
+    fi
+
+    # Показываем переменные окружения
+    echo -e "${BLUE}Переменные окружения:${NC}"
+    echo -e "  SERVER_ENDPOINT: ${SERVER_ENDPOINT:-localhost}"
+    echo -e "  WG_PORT: ${WG_PORT:-51820}"
+    echo -e "  DNS: ${ADGUARD_DNS_IP1:-94.140.14.14},${ADGUARD_DNS_IP2:-94.140.15.15}"
+    echo ""
+
+    # Создаем конфигурацию
+    create_config "$TYPE" "$CLIENT_NAME"
+}
+
+main "$@"
+EOF
+
+# Создание скрипта для массовой генерации
+RUN cat > /app/batch-generator.sh << 'EOF'
+#!/bin/bash
+
+# Массовая генерация конфигураций
+
+set -e
+
+CLIENTS_FILE=${1:-"/app/clients.txt"}
+OUTPUT_DIR=${2:-"/app/output"}
+
+if [[ ! -f "$CLIENTS_FILE" ]]; then
+    echo "Создание примера файла клиентов..."
+    cat > "$CLIENTS_FILE" << EFC
+# Формат: тип:имя_клиента
+mobile:phone1
+mobile:phone2
+router:keenetic-home
+desktop:laptop-work
+desktop:pc-gaming
+https:bypass-work
+EFC
+    echo "Отредактируйте файл $CLIENTS_FILE и запустите снова"
+    exit 0
+fi
+
+echo "Массовая генерация конфигураций из $CLIENTS_FILE"
+
+while IFS=':' read -r type name; do
+    # Пропускаем комментарии и пустые строки
+    [[ "$type" =~ ^#.*$ ]] && continue
+    [[ -z "$type" || -z "$name" ]] && continue
+
+    echo "Создание $type конфигурации для $name"
+    /app/generator.sh "$type" "$name" "$OUTPUT_DIR"
+    echo "---"
+done < "$CLIENTS_FILE"
+
+echo "Массовая генерация завершена. Файлы в $OUTPUT_DIR"
+EOF
+
+# Копирование шаблонов (будут монтироваться из хоста)
+RUN mkdir -p /app/templates /app/output /app/config
+
+# Установка прав
+RUN chown -R generator:generator /app \
+    && chmod +x /app/*.sh
+
+# Переключение на пользователя
+USER generator
+
+# Рабочая директория
+WORKDIR /app
+
+# Точка входа
+ENTRYPOINT ["/app/generator.sh"]
+
+# Метаданные
+LABEL maintainer="WireGuard Obfuscation Team"
+LABEL description="WireGuard Configuration Generator with AmneziaWG support"
+LABEL version="1.0"
