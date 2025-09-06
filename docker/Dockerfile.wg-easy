@@ -12,7 +12,7 @@ RUN apk add --no-cache \
 # Клонирование и сборка wg-easy
 WORKDIR /app
 RUN git clone https://github.com/wg-easy/wg-easy.git .
-RUN npm ci --only=production
+RUN npm install --omit=dev
 
 # Основной образ
 FROM alpine:latest
