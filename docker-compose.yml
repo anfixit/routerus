@@ -87,7 +87,7 @@ services:
       - ./web:/var/www/html:ro
       - wg_data:/var/wireguard:ro
     ports:
-      - "${STATS_PORT:-8080}:80/tcp"
+      - "${STATS_PORT:-8081}:80/tcp"
     environment:
       - WG_CONFIG_PATH=/var/wireguard
     depends_on:
