@@ -93,6 +93,96 @@ get_external_ip() {
     echo "$ip"
 }
 
+# Генерация конфигурации Cloak
+generate_cloak_config() {
+    if [[ "$CLOAK_ENABLED" == "true" ]]; then
+        echo -e "${BLUE}Генерация конфигурации Cloak...${NC}"
+
+        # Создаем директории если их нет
+        mkdir -p docker/cloak
+
+        # Генерируем UID для Cloak (должен быть уникальным)
+        CLOAK_UID=$(openssl rand -base64 16 | tr -d '=+/' | head -c22)
+
+        # Генерируем AdminUID (для управления)
+        CLOAK_ADMIN_UID=$(openssl rand -base64 16 | tr -d '=+/' | head -c22)
+
+        # Генерируем приватный ключ для Cloak (32 байта в hex)
+        CLOAK_PRIVATE_KEY=$(openssl rand -hex 32)
+
+        # Генерируем PublicKey из PrivateKey (упрощенная версия)
+        CLOAK_PUBLIC_KEY=$(echo -n "$CLOAK_PRIVATE_KEY" | openssl dgst -sha256 -hex | cut -d' ' -f2 | head -c64)
+
+        # Используем выбранный или случайный decoy site
+        if [[ -z "$CLOAK_DECOY_SITE" ]]; then
+            DECOY_SITES=("www.bing.com" "www.microsoft.com" "www.github.com" "ajax.googleapis.com")
+            CLOAK_DECOY_SITE=${DECOY_SITES[$((RANDOM % ${#DECOY_SITES[@]}))]}
+        fi
+
+        echo -e "${GREEN}Сгенерированы параметры Cloak:${NC}"
+        echo -e "  UID: ${CYAN}${CLOAK_UID}${NC}"
+        echo -e "  Decoy Site: ${CYAN}${CLOAK_DECOY_SITE}${NC}"
+
+        # Создаем серверную конфигурацию Cloak
+        cat > docker/cloak/config.json << EOF
+{
+  "ProxyBook": {
+    "wireguard": [
+      "tcp",
+      "wg-easy:51820"
+    ]
+  },
+  "BindAddr": [
+    ":8443",
+    ":8081"
+  ],
+  "BypassUID": [
+    "${CLOAK_UID}",
+    "${CLOAK_ADMIN_UID}"
+  ],
+  "RedirAddr": "${CLOAK_DECOY_SITE}",
+  "PrivateKey": "${CLOAK_PRIVATE_KEY}",
+  "AdminUID": "${CLOAK_ADMIN_UID}",
+  "DatabasePath": "/opt/cloak/data/userinfo.db",
+  "StreamTimeout": 300
+}
+EOF
+
+        # Сохраняем клиентские параметры в отдельный файл
+        cat > docker/cloak/client-config.json << EOF
+{
+  "Transport": "direct",
+  "ProxyMethod": "shadowsocks",
+  "EncryptionMethod": "chacha20-ietf-poly1305",
+  "UID": "${CLOAK_UID}",
+  "PublicKey": "${CLOAK_PUBLIC_KEY}",
+  "ServerName": "${CLOAK_DECOY_SITE}",
+  "ServerAddr": "${SERVER_ENDPOINT}:8443",
+  "NumConn": 4,
+  "BrowserSig": "chrome",
+  "StreamTimeout": 300
+}
+EOF
+
+        # Добавляем переменные Cloak в .env
+        cat >> "$ENV_FILE" << EOF
+
+# =================
+# НАСТРОЙКИ CLOAK
+# =================
+CLOAK_UID=${CLOAK_UID}
+CLOAK_ADMIN_UID=${CLOAK_ADMIN_UID}
+CLOAK_PRIVATE_KEY=${CLOAK_PRIVATE_KEY}
+CLOAK_PUBLIC_KEY=${CLOAK_PUBLIC_KEY}
+CLOAK_DECOY_SITE=${CLOAK_DECOY_SITE}
+EOF
+
+        echo -e "${GREEN}Конфигурация Cloak создана успешно${NC}"
+        echo -e "${YELLOW}Серверная конфигурация: docker/cloak/config.json${NC}"
+        echo -e "${YELLOW}Клиентская конфигурация: docker/cloak/client-config.json${NC}"
+    fi
+}
+
 # Интерактивная настройка
 interactive_setup() {
     echo -e "${YELLOW}=== Конфигурация WireGuard Obfuscation Setup ===${NC}"
@@ -233,16 +323,23 @@ interactive_setup() {
     read -p "Включить Cloak для дополнительной обфускации? [y/n]: " enable_cloak
     if [[ "$enable_cloak" =~ ^[Yy] ]]; then
         CLOAK_ENABLED="true"
-        echo -e "${GREEN}Cloak будет включен${NC}"
+        echo -e "${GREEN}Cloak будет включен и настроен автоматически${NC}"
 
-        # Запускаем генератор Cloak конфигурации
-        if [[ -f "scripts/setup-cloak.sh" ]]; then
-            echo -e "${BLUE}Настройка Cloak обфускации...${NC}"
-            chmod +x scripts/setup-cloak.sh
-            ./scripts/setup-cloak.sh
-        else
-            echo -e "${YELLOW}Скрипт настройки Cloak не найден, будет настроен позже${NC}"
-        fi
+        echo
+        echo -e "${BLUE}Выберите уровень маскировки Cloak:${NC}"
+        echo -e "${BLUE}1)${NC} Microsoft/Bing (рекомендуется)"
+        echo -e "${BLUE}2)${NC} GitHub"
+        echo -e "${BLUE}3)${NC} Google APIs"
+        echo -e "${BLUE}4)${NC} Случайный выбор"
+        echo
+        read -p "Выберите опцию (1-4): " cloak_choice
+
+        case $cloak_choice in
+            1) CLOAK_DECOY_SITE="www.bing.com" ;;
+            2) CLOAK_DECOY_SITE="www.github.com" ;;
+            3) CLOAK_DECOY_SITE="ajax.googleapis.com" ;;
+            *) CLOAK_DECOY_SITE="" ;; # Будет выбран случайно в generate_cloak_config
+        esac
     else
         CLOAK_ENABLED="false"
     fi
@@ -303,7 +400,7 @@ ADGUARD_DNS_TLS=$ADGUARD_DNS_TLS
 STATS_PORT=${STATS_PORT:-8080}
 CLOAK_ENABLED=$CLOAK_ENABLED
 CLOAK_HTTPS_PORT=8443
-CLOAK_HTTP_PORT=8080
+CLOAK_HTTP_PORT=8081
 
 # =================
 # ГЕНЕРАЦИЯ КОНФИГОВ
@@ -364,7 +461,12 @@ show_summary() {
         echo -e "  Статистика: ${BLUE}http://$SERVER_ENDPOINT:$STATS_PORT${NC}"
     fi
     echo
-    echo -e "${GREEN}Теперь запустите: ${CYAN}docker-compose up -d${NC}"
+    echo -e "${GREEN}Команды для запуска:${NC}"
+    if [[ "$CLOAK_ENABLED" == "true" ]]; then
+        echo -e "  ${CYAN}docker compose --profile cloak up -d${NC}  # С максимальной обфускацией"
+    else
+        echo -e "  ${CYAN}docker compose up -d${NC}  # Базовая обфускация"
+    fi
     echo -e "${CYAN}===============================================${NC}"
 }
 
@@ -378,7 +480,7 @@ main() {
 
     if [[ $env_status -eq 0 ]]; then
         echo -e "${GREEN}Используется существующая конфигурация${NC}"
-        echo -e "${BLUE}Запустите: docker-compose up -d${NC}"
+        echo -e "${BLUE}Запустите: docker compose up -d${NC}"
         return 0
     elif [[ $env_status -eq 2 ]]; then
         echo -e "${YELLOW}Для редактирования используйте: nano .env${NC}"
@@ -393,6 +495,7 @@ main() {
 
     interactive_setup
     create_env_file
+    generate_cloak_config
     show_summary
 }
 

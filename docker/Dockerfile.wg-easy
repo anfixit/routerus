@@ -46,6 +46,12 @@ RUN apk add --no-cache --virtual .build-deps \
     && rm -rf /tmp/amneziawg \
     && apk del .build-deps
 
+# КЛЮЧЕВОЕ ИСПРАВЛЕНИЕ: Подмена стандартного WireGuard на AmneziaWG
+# Это заставляет wg-easy использовать AWG вместо обычного WG
+RUN which awg-quick && which awg \
+    && ln -sf $(which awg-quick) /usr/bin/wg-quick \
+    && ln -sf $(which awg) /usr/bin/wg
+
 # Копирование wg-easy
 COPY --from=build /app /app
 WORKDIR /app
@@ -58,192 +64,71 @@ RUN addgroup -g 1000 wg-easy \
 # Создание директорий
 RUN mkdir -p /etc/wireguard \
     && mkdir -p /app/scripts \
-    && mkdir -p /app/templates \
     && mkdir -p /app/config \
     && chown -R wg-easy:wg-easy /etc/wireguard /app
 
-# Создание скрипта настройки окружения
-RUN cat > /app/config/env.sh << 'ENVEOF'
-#!/bin/bash
+# Создание env.sh с помощью echo
+RUN echo '#!/bin/bash' > /app/config/env.sh \
+    && echo 'export SERVER_ENDPOINT=${SERVER_ENDPOINT:-"localhost"}' >> /app/config/env.sh \
+    && echo 'export WG_PORT=${WG_PORT:-51820}' >> /app/config/env.sh \
+    && echo 'export ADGUARD_DNS_IP1=${ADGUARD_DNS_IP1:-"94.140.14.14"}' >> /app/config/env.sh \
+    && echo 'export ADGUARD_DNS_IP2=${ADGUARD_DNS_IP2:-"94.140.15.15"}' >> /app/config/env.sh \
+    && echo 'export AMNEZIA_JC=${AMNEZIA_JC:-5}' >> /app/config/env.sh \
+    && echo 'export AMNEZIA_JMIN=${AMNEZIA_JMIN:-100}' >> /app/config/env.sh \
+    && echo 'export AMNEZIA_JMAX=${AMNEZIA_JMAX:-1000}' >> /app/config/env.sh \
+    && echo 'export AMNEZIA_S1=${AMNEZIA_S1:-86}' >> /app/config/env.sh \
+    && echo 'export AMNEZIA_S2=${AMNEZIA_S2:-92}' >> /app/config/env.sh \
+    && echo 'export AMNEZIA_H1=${AMNEZIA_H1:-1234567890}' >> /app/config/env.sh \
+    && echo 'export AMNEZIA_H2=${AMNEZIA_H2:-9876543210}' >> /app/config/env.sh \
+    && echo 'export AMNEZIA_H3=${AMNEZIA_H3:-1122334455}' >> /app/config/env.sh \
+    && echo 'export AMNEZIA_H4=${AMNEZIA_H4:-5544332211}' >> /app/config/env.sh
 
-# Загрузка переменных окружения с значениями по умолчанию
+# Создание init-amnezia.sh с помощью echo
+RUN echo '#!/bin/bash' > /app/scripts/init-amnezia.sh \
+    && echo 'set -e' >> /app/scripts/init-amnezia.sh \
+    && echo 'WG_CONFIG="/etc/wireguard/wg0.conf"' >> /app/scripts/init-amnezia.sh \
+    && echo 'if [[ ! -f "/etc/wireguard/server_private.key" ]]; then' >> /app/scripts/init-amnezia.sh \
+    && echo '  echo "Генерация ключей сервера..."' >> /app/scripts/init-amnezia.sh \
+    && echo '  wg genkey > /etc/wireguard/server_private.key' >> /app/scripts/init-amnezia.sh \
+    && echo '  cat /etc/wireguard/server_private.key | wg pubkey > /etc/wireguard/server_public.key' >> /app/scripts/init-amnezia.sh \
+    && echo '  chmod 600 /etc/wireguard/server_private.key' >> /app/scripts/init-amnezia.sh \
+    && echo 'fi' >> /app/scripts/init-amnezia.sh \
+    && echo 'if [[ ! -f "$WG_CONFIG" ]]; then' >> /app/scripts/init-amnezia.sh \
+    && echo '  echo "Создание серверной конфигурации..."' >> /app/scripts/init-amnezia.sh \
+    && echo '  echo "[Interface]" > "$WG_CONFIG"' >> /app/scripts/init-amnezia.sh \
+    && echo '  echo "PrivateKey = $(cat /etc/wireguard/server_private.key)" >> "$WG_CONFIG"' >> /app/scripts/init-amnezia.sh \
+    && echo '  echo "Address = 10.8.0.1/24" >> "$WG_CONFIG"' >> /app/scripts/init-amnezia.sh \
+    && echo '  echo "ListenPort = ${WG_PORT:-51820}" >> "$WG_CONFIG"' >> /app/scripts/init-amnezia.sh \
+    && echo '  echo "PostUp = iptables -A FORWARD -i %i -j ACCEPT; iptables -A FORWARD -o %i -j ACCEPT; iptables -t nat -A POSTROUTING -o eth+ -j MASQUERADE" >> "$WG_CONFIG"' >> /app/scripts/init-amnezia.sh \
+    && echo '  echo "PostDown = iptables -D FORWARD -i %i -j ACCEPT; iptables -D FORWARD -o %i -j ACCEPT; iptables -t nat -D POSTROUTING -o eth+ -j MASQUERADE" >> "$WG_CONFIG"' >> /app/scripts/init-amnezia.sh \
+    && echo '  echo "# Параметры обфускации AmneziaWG" >> "$WG_CONFIG"' >> /app/scripts/init-amnezia.sh \
+    && echo '  echo "Jc = ${AMNEZIA_JC:-5}" >> "$WG_CONFIG"' >> /app/scripts/init-amnezia.sh \
+    && echo '  echo "Jmin = ${AMNEZIA_JMIN:-100}" >> "$WG_CONFIG"' >> /app/scripts/init-amnezia.sh \
+    && echo '  echo "Jmax = ${AMNEZIA_JMAX:-1000}" >> "$WG_CONFIG"' >> /app/scripts/init-amnezia.sh \
+    && echo '  echo "S1 = ${AMNEZIA_S1:-86}" >> "$WG_CONFIG"' >> /app/scripts/init-amnezia.sh \
+    && echo '  echo "S2 = ${AMNEZIA_S2:-92}" >> "$WG_CONFIG"' >> /app/scripts/init-amnezia.sh \
+    && echo '  echo "H1 = ${AMNEZIA_H1:-1234567890}" >> "$WG_CONFIG"' >> /app/scripts/init-amnezia.sh \
+    && echo '  echo "H2 = ${AMNEZIA_H2:-9876543210}" >> "$WG_CONFIG"' >> /app/scripts/init-amnezia.sh \
+    && echo '  echo "H3 = ${AMNEZIA_H3:-1122334455}" >> "$WG_CONFIG"' >> /app/scripts/init-amnezia.sh \
+    && echo '  echo "H4 = ${AMNEZIA_H4:-5544332211}" >> "$WG_CONFIG"' >> /app/scripts/init-amnezia.sh \
+    && echo 'fi' >> /app/scripts/init-amnezia.sh \
+    && echo 'echo "AmneziaWG сервер инициализирован"' >> /app/scripts/init-amnezia.sh
 
-export SERVER_ENDPOINT=${SERVER_ENDPOINT:-"localhost"}
-export WG_PORT=${WG_PORT:-51820}
-export ADGUARD_DNS_IP1=${ADGUARD_DNS_IP1:-"94.140.14.14"}
-export ADGUARD_DNS_IP2=${ADGUARD_DNS_IP2:-"94.140.15.15"}
+# Создание start.sh с помощью echo
+RUN echo '#!/bin/bash' > /app/start.sh \
+    && echo 'set -e' >> /app/start.sh \
+    && echo 'echo "Запуск RouteRus VPN с поддержкой AmneziaWG..."' >> /app/start.sh \
+    && echo 'source /app/config/env.sh' >> /app/start.sh \
+    && echo 'bash /app/scripts/init-amnezia.sh' >> /app/start.sh \
+    && echo 'chown -R wg-easy:wg-easy /etc/wireguard' >> /app/start.sh \
+    && echo 'echo 1 > /proc/sys/net/ipv4/ip_forward' >> /app/start.sh \
+    && echo 'echo "Запуск wg-easy сервера..."' >> /app/start.sh \
+    && echo 'exec node server.js' >> /app/start.sh
 
-# Параметры обфускации AmneziaWG
-export AMNEZIA_JC=${AMNEZIA_JC:-5}
-export AMNEZIA_JMIN=${AMNEZIA_JMIN:-100}
-export AMNEZIA_JMAX=${AMNEZIA_JMAX:-1000}
-export AMNEZIA_S1=${AMNEZIA_S1:-86}
-export AMNEZIA_S2=${AMNEZIA_S2:-92}
-export AMNEZIA_H1=${AMNEZIA_H1:-1234567890}
-export AMNEZIA_H2=${AMNEZIA_H2:-9876543210}
-export AMNEZIA_H3=${AMNEZIA_H3:-1122334455}
-export AMNEZIA_H4=${AMNEZIA_H4:-5544332211}
-
-# Получение публичного ключа сервера
-if [[ -f "/etc/wireguard/server_public.key" ]]; then
-    export SERVER_PUBLIC_KEY=$(cat /etc/wireguard/server_public.key)
-elif [[ -f "/etc/wireguard/wg0.conf" ]]; then
-    export SERVER_PUBLIC_KEY=$(grep "^# PublicKey" /etc/wireguard/wg0.conf | cut -d'=' -f2 | xargs)
-else
-    export SERVER_PUBLIC_KEY="PLACEHOLDER_PUBLIC_KEY"
-fi
-ENVEOF
-
-# Создание скрипта инициализации с обфускацией
-RUN cat > /app/scripts/init-amnezia.sh << 'INITEOF'
-#!/bin/bash
-
-# Инициализация AmneziaWG сервера
-
-set -e
-
-WG_CONFIG="/etc/wireguard/wg0.conf"
-
-# Генерация ключей сервера если их нет
-if [[ ! -f "/etc/wireguard/server_private.key" ]]; then
-    echo "Генерация ключей сервера..."
-    wg genkey > /etc/wireguard/server_private.key
-    cat /etc/wireguard/server_private.key | wg pubkey > /etc/wireguard/server_public.key
-    chmod 600 /etc/wireguard/server_private.key
-fi
-
-# Создание серверной конфигурации с поддержкой AmneziaWG
-if [[ ! -f "$WG_CONFIG" ]]; then
-    echo "Создание серверной конфигурации..."
-    cat > "$WG_CONFIG" << WGCONF
-[Interface]
-PrivateKey = $(cat /etc/wireguard/server_private.key)
-Address = 10.8.0.1/24
-ListenPort = ${WG_PORT:-51820}
-PostUp = iptables -A FORWARD -i %i -j ACCEPT; iptables -A FORWARD -o %i -j ACCEPT; iptables -t nat -A POSTROUTING -o eth+ -j MASQUERADE
-PostDown = iptables -D FORWARD -i %i -j ACCEPT; iptables -D FORWARD -o %i -j ACCEPT; iptables -t nat -D POSTROUTING -o eth+ -j MASQUERADE
-
-# Параметры обфускации AmneziaWG
-Jc = ${AMNEZIA_JC:-5}
-Jmin = ${AMNEZIA_JMIN:-100}
-Jmax = ${AMNEZIA_JMAX:-1000}
-S1 = ${AMNEZIA_S1:-86}
-S2 = ${AMNEZIA_S2:-92}
-H1 = ${AMNEZIA_H1:-1234567890}
-H2 = ${AMNEZIA_H2:-9876543210}
-H3 = ${AMNEZIA_H3:-1122334455}
-H4 = ${AMNEZIA_H4:-5544332211}
-
-# PublicKey = $(cat /etc/wireguard/server_public.key)
-WGCONF
-fi
-
-echo "AmneziaWG сервер инициализирован"
-INITEOF
-
-# Создание генератора конфигов с обфускацией
-RUN cat > /app/scripts/config-generator.sh << 'GENEOF'
-#!/bin/bash
-
-# Генератор конфигов с поддержкой AmneziaWG обфускации
-
-set -e
-
-TYPE=${1:-standard}
-CLIENT_NAME=${2:-"client-$(date +%s)"}
-OUTPUT_DIR="/etc/wireguard"
-
-# Загружаем переменные окружения
-source /app/config/env.sh
-
-# Функция генерации ключей
-generate_keys() {
-    local private_key public_key
-    private_key=$(wg genkey)
-    public_key=$(echo "$private_key" | wg pubkey)
-    echo "$private_key:$public_key"
-}
-
-# Функция получения следующего IP
-get_next_ip() {
-    local base_ip="10.8.0"
-    local used_ips=$(grep -h "Address = " /etc/wireguard/*.conf 2>/dev/null | cut -d'=' -f2 | cut -d'/' -f1 | sort -V || true)
-
-    for i in {2..254}; do
-        local test_ip="$base_ip.$i"
-        if ! echo "$used_ips" | grep -q "$test_ip"; then
-            echo "$test_ip/32"
-            return
-        fi
-    done
-
-    echo "10.8.0.100/32"  # fallback
-}
-
-# Функция добавления клиента на сервер
-add_client_to_server() {
-    local client_name=$1
-    local client_public_key=$2
-    local client_ip=$3
-
-    # Добавляем peer в серверную конфигурацию
-    local server_config="/etc/wireguard/wg0.conf"
-
-    if [[ -f "$server_config" ]]; then
-        cat >> "$server_config" << PEERCONF
-
-# Client: $client_name
-[Peer]
-PublicKey = $client_public_key
-AllowedIPs = $client_ip
-PEERCONF
-        echo "Client $client_name added to server config"
-    fi
-}
-
-echo "Config generator loaded"
-GENEOF
-
-# Создание wrapper скрипта для wg-easy
-RUN cat > /app/start.sh << 'STARTEOF'
-#!/bin/bash
-
-# Wrapper для запуска wg-easy с поддержкой AmneziaWG
-
-set -e
-
-echo "Запуск RouteRus VPN с поддержкой AmneziaWG..."
-
-# Проверяем наличие скрипта инициализации
-if [[ -f "/app/scripts/init-amnezia.sh" ]]; then
-    echo "Инициализация AmneziaWG..."
-    source /app/config/env.sh
-    bash /app/scripts/init-amnezia.sh
-else
-    echo "Скрипт инициализации не найден, пропускаем..."
-fi
-
-# Установка прав
-chown -R wg-easy:wg-easy /etc/wireguard
-
-# Включение IP forwarding
-echo 1 > /proc/sys/net/ipv4/ip_forward
-
-# Запуск оригинального wg-easy
-echo "Запуск wg-easy сервера..."
-exec node server.js
-STARTEOF
-
-# Делаем все скрипты исполняемыми
-RUN chmod +x /app/scripts/*.sh \
+# Установка прав на выполнение
+RUN chmod +x /app/scripts/init-amnezia.sh \
     && chmod +x /app/config/env.sh \
     && chmod +x /app/start.sh
-
-# Создание алиасов для удобства
-RUN echo 'alias wg-gen="/app/scripts/config-generator.sh"' >> /home/wg-easy/.bashrc \
-    && echo 'alias wg-mobile="/app/scripts/config-generator.sh mobile"' >> /home/wg-easy/.bashrc \
-    && echo 'alias wg-router="/app/scripts/config-generator.sh router"' >> /home/wg-easy/.bashrc \
-    && echo 'alias wg-desktop="/app/scripts/config-generator.sh desktop"' >> /home/wg-easy/.bashrc
 
 # Переключение на пользователя
 USER wg-easy
