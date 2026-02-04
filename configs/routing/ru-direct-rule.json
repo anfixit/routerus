@@ -1,0 +1,47 @@
+{
+  "ru_domains": {
+    "type": "field",
+    "inboundTag": ["redirect", "tproxy"],
+    "outboundTag": "direct",
+    "domain": [
+      "regexp:^([\\w\\-\\.]+\\.)ru$",
+      "regexp:^([\\w\\-\\.]+\\.)su$",
+      "regexp:^([\\w\\-\\.]+\\.)xn--p1ai$",
+      "regexp:^([\\w\\-\\.]+\\.)xn--p1acf$",
+      "regexp:^([\\w\\-\\.]+\\.)xn--80asehdb$",
+      "regexp:^([\\w\\-\\.]+\\.)xn--c1avg$",
+      "regexp:^([\\w\\-\\.]+\\.)xn--80aswg$",
+      "regexp:^([\\w\\-\\.]+\\.)xn--80adxhks$",
+      "regexp:^([\\w\\-\\.]+\\.)moscow$",
+      "regexp:^([\\w\\-\\.]+\\.)xn--d1acj3b$",
+      "geosite:category-gov-ru",
+      "geosite:yandex",
+      "geosite:vk",
+      "geosite:steam",
+      "geosite:mail-ru",
+      "geosite:ok-ru",
+      "geosite:sberbank",
+      "geosite:tinkoff"
+    ]
+  },
+  "ru_ips": {
+    "type": "field",
+    "inboundTag": ["redirect", "tproxy"],
+    "outboundTag": "direct",
+    "ip": [
+      "127.0.0.0/8",
+      "10.0.0.0/8",
+      "172.16.0.0/12",
+      "192.168.0.0/16",
+      "169.254.0.0/16",
+      "geoip:ru",
+      "geoip:private"
+    ]
+  },
+  "bittorrent": {
+    "type": "field",
+    "inboundTag": ["redirect", "tproxy"],
+    "outboundTag": "direct",
+    "protocol": ["bittorrent"]
+  }
+}

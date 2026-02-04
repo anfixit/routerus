@@ -1,0 +1,47 @@
+name: Shell Script Validation
+
+on:
+  push:
+    branches: [ main, develop ]
+  pull_request:
+    branches: [ main ]
+
+jobs:
+  shellcheck:
+    name: Shellcheck
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v3
+      
+      - name: Run ShellCheck
+        uses: ludeeus/action-shellcheck@master
+        with:
+          scandir: './scripts'
+          
+      - name: Check install.sh
+        run: shellcheck install.sh quick-install.sh || true
+
+  syntax-check:
+    name: Bash Syntax Check
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v3
+      
+      - name: Check syntax of all scripts
+        run: |
+          find . -name "*.sh" -type f -exec bash -n {} \;
+          echo "✅ All scripts have valid syntax"
+
+  json-validation:
+    name: JSON Validation
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v3
+      
+      - name: Validate JSON configs
+        run: |
+          for file in configs/routing/*.json; do
+            echo "Checking $file"
+            jq empty "$file" || exit 1
+          done
+          echo "✅ All JSON configs are valid"

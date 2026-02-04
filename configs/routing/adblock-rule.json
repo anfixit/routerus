@@ -1,0 +1,21 @@
+{
+  "type": "field",
+  "inboundTag": ["redirect", "tproxy"],
+  "outboundTag": "block",
+  "domain": [
+    "geosite:category-ads-all",
+    "google-analytics",
+    "analytics.yandex",
+    "appcenter.ms",
+    "app-measurement.com",
+    "firebase.io",
+    "crashlytics.com",
+    "doubleclick.net",
+    "googleadservices.com",
+    "googlesyndication.com",
+    "googletagmanager.com",
+    "facebook.com",
+    "graph.facebook.com",
+    "connect.facebook.net"
+  ]
+}

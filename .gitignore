@@ -1,0 +1,50 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+.ropeproject/
+
+# Environment
+.env
+.env.local
+.env.*.local
+venv/
+ENV/
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Logs
+*.log
+logs/
+
+# Backups
+*.backup
+*.bak
+*.old
+
+# Temporary files
+*.tmp
+/tmp/
+
+# Sensitive data
+*.key
+*.pem
+*.crt
+*.db
+*.sqlite
+
+# Node
+node_modules/
+npm-debug.log
+yarn-error.log

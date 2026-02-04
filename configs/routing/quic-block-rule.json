@@ -1,0 +1,17 @@
+{
+  "quic_block": {
+    "type": "field",
+    "inboundTag": ["redirect", "tproxy"],
+    "outboundTag": "block",
+    "network": "udp",
+    "port": "443",
+    "ip": ["geoip:!ru"]
+  },
+  "netbios_block": {
+    "type": "field",
+    "inboundTag": ["redirect", "tproxy"],
+    "outboundTag": "block",
+    "network": "udp",
+    "port": "135,137,138,139"
+  }
+}
