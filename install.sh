@@ -10,6 +10,16 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_URL="https://raw.githubusercontent.com/anfixit/routerus/main"
 
+# Secure temporary directory for downloaded modules
+INSTALL_TMPDIR=""
+
+cleanup_install() {
+    if [[ -n "${INSTALL_TMPDIR}" && -d "${INSTALL_TMPDIR}" ]]; then
+        rm -rf "${INSTALL_TMPDIR}"
+    fi
+}
+trap cleanup_install EXIT INT TERM
+
 # --- Helper: download and source a script module ---
 
 load_module() {
@@ -20,9 +30,25 @@ load_module() {
         # shellcheck source=/dev/null
         source "${local_path}"
     else
-        wget -qO "/tmp/${script_name}" "${REPO_URL}/scripts/${script_name}"
+        if [[ -z "${INSTALL_TMPDIR}" ]]; then
+            INSTALL_TMPDIR="$(mktemp -d /tmp/routerus-XXXXXXXXXX)"
+        fi
+        local tmp_path="${INSTALL_TMPDIR}/${script_name}"
+        wget -qO "${tmp_path}" "${REPO_URL}/scripts/${script_name}" || {
+            msg_err "Failed to download module: ${script_name}"
+            return 1
+        }
+        # Verify downloaded file is a non-empty shell script
+        if [[ ! -s "${tmp_path}" ]]; then
+            msg_err "Downloaded module is empty: ${script_name}"
+            return 1
+        fi
+        if ! head -1 "${tmp_path}" | grep -q '^#!/bin/bash'; then
+            msg_err "Downloaded module is not a valid bash script: ${script_name}"
+            return 1
+        fi
         # shellcheck source=/dev/null
-        source "/tmp/${script_name}"
+        source "${tmp_path}"
     fi
 }
 
@@ -74,6 +100,25 @@ if [[ ${EUID} -ne 0 ]]; then
     exit 1
 fi
 
+# --- Input validation helpers ---
+
+validate_domain() {
+    local domain="$1"
+    if [[ ! "${domain}" =~ ^[a-zA-Z0-9]([a-zA-Z0-9.-]*[a-zA-Z0-9])?$ ]]; then
+        msg_err "Invalid domain format: ${domain}"
+        exit 1
+    fi
+}
+
+validate_yn() {
+    local value="$1"
+    local name="$2"
+    if [[ "${value}" != "y" && "${value}" != "n" && "${value}" != "ask" ]]; then
+        msg_err "Invalid value for ${name}: ${value} (expected y or n)"
+        exit 1
+    fi
+}
+
 # --- Banner ---
 
 show_banner() {
@@ -103,15 +148,25 @@ while [[ $# -gt 0 ]]; do
         --install|-install)
             INSTALL_MODE="$2"; shift 2 ;;
         --subdomain|-subdomain)
-            DOMAIN="$2"; shift 2 ;;
+            DOMAIN="$2"; shift 2
+            [[ -n "${DOMAIN}" ]] && validate_domain "${DOMAIN}"
+            ;;
         --reality-domain|-reality_domain)
-            REALITY_DOMAIN="$2"; shift 2 ;;
+            REALITY_DOMAIN="$2"; shift 2
+            [[ -n "${REALITY_DOMAIN}" ]] && validate_domain "${REALITY_DOMAIN}"
+            ;;
         --enable-adblock|-enable_adblock)
-            ENABLE_ADBLOCK="$2"; shift 2 ;;
+            ENABLE_ADBLOCK="$2"; shift 2
+            validate_yn "${ENABLE_ADBLOCK}" "--enable-adblock"
+            ;;
         --enable-ru-routing|-enable_ru_routing)
-            ENABLE_RU_ROUTING="$2"; shift 2 ;;
+            ENABLE_RU_ROUTING="$2"; shift 2
+            validate_yn "${ENABLE_RU_ROUTING}" "--enable-ru-routing"
+            ;;
         --enable-quic-block|-enable_quic_block)
-            ENABLE_QUIC_BLOCK="$2"; shift 2 ;;
+            ENABLE_QUIC_BLOCK="$2"; shift 2
+            validate_yn "${ENABLE_QUIC_BLOCK}" "--enable-quic-block"
+            ;;
         --uninstall|-uninstall)
             load_module "uninstall.sh"
             uninstall_routerus

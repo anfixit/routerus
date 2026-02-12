@@ -7,12 +7,14 @@
 set -euo pipefail
 
 REPO_URL="https://raw.githubusercontent.com/anfixit/routerus/main"
-TEMP_DIR="/tmp/routerus-install"
+TEMP_DIR=""
 
 cleanup() {
-    rm -rf "${TEMP_DIR}"
+    if [[ -n "${TEMP_DIR}" && -d "${TEMP_DIR}" ]]; then
+        rm -rf "${TEMP_DIR}"
+    fi
 }
-trap cleanup EXIT
+trap cleanup EXIT INT TERM
 
 echo "RouteRus Quick Installer"
 echo "=============================="
@@ -41,13 +43,20 @@ if [[ "${ID}" != "ubuntu" ]] || [[ "${VERSION_ID}" != "24.04" ]]; then
     fi
 fi
 
+TEMP_DIR="$(mktemp -d /tmp/routerus-install-XXXXXXXXXX)"
+
 echo "Downloading RouteRus..."
-mkdir -p "${TEMP_DIR}"
 
 wget -q --show-progress -O "${TEMP_DIR}/install.sh" "${REPO_URL}/install.sh" || {
     echo "ERROR: Failed to download installer"
     exit 1
 }
+
+# Verify the download is a shell script
+if ! head -1 "${TEMP_DIR}/install.sh" | grep -q '^#!/bin/bash'; then
+    echo "ERROR: Downloaded file is not a valid installer"
+    exit 1
+fi
 
 chmod +x "${TEMP_DIR}/install.sh"
 
