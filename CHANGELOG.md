@@ -17,6 +17,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Multi-server management
 - Docker version
 
+## [1.1.0] - 2026-02-12
+
+### Added
+- `install-packages.sh`: installs all required system packages (nginx, certbot, sqlite3, jq, ufw, etc.) with post-install verification of critical binaries
+- `install-xui.sh`: downloads latest 3X-UI release from GitHub API, installs binary, creates systemd service, auto-generates panel credentials (port, path, username, password)
+- `ssl-setup.sh`: automated Let's Encrypt certificate issuance via certbot standalone mode for panel domain (and optionally REALITY domain)
+- `db-config.sh`: configures 3X-UI SQLite database — sets panel port/path, SSL cert paths, credentials, Telegram bot settings; creates backup before modification
+- `.env` file support in `install.sh` — loads configuration from `.env` if present, allowing pre-configured automated installs
+
+### Changed
+- Updated `install.sh` to declare global state variables (credentials, cert paths, Telegram settings) shared between modules
+- Bumped version to 1.1.0
+
 ## [1.0.1] - 2026-02-12
 
 ### Changed
