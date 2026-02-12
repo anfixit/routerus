@@ -17,6 +17,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Multi-server management
 - Docker version
 
+## [1.2.0] - 2026-02-12
+
+### Added
+- `domain-setup.sh`: interactive domain input with validation; skips prompts when domains are set via CLI args or .env
+- `routing-config.sh`: interactive routing feature selection (adblock, RU routing, QUIC block) with y/n prompts
+- `setup-routing.sh`: assembles Xray routing rules from JSON templates in configs/routing/; downloads GeoIP/GeoSite databases from Loyalsoldier/v2ray-rules-dat; stores assembled config in 3X-UI database
+- `nginx-config.sh`: configures Nginx reverse proxy (HTTPS -> panel), WebSocket support, fake website for masking, stream SNI routing for REALITY domain
+- `create-inbounds.sh`: creates VLESS+REALITY inbound with auto-generated x25519 keypair, UUID, short ID; inserts into 3X-UI database
+
+### Changed
+- Updated `install.sh` with REALITY state variables and UPDATE_GEOFILES support
+- Bumped version to 1.2.0
+
 ## [1.1.0] - 2026-02-12
 
 ### Added

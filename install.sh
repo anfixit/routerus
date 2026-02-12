@@ -1,5 +1,5 @@
 #!/bin/bash
-#################### RouteRus v1.1.0 ##################################
+#################### RouteRus v1.2.0 ##################################
 # GitHub: https://github.com/anfixit/routerus
 # Based on x-ui-pro by @crazy_day_admin (https://t.me/crazy_day_admin)
 # Routing by @Corvus-Malus (https://github.com/Corvus-Malus)
@@ -130,7 +130,7 @@ show_banner() {
     msg_inf ' |_| \_\___/ \__,_|\__\___|_| \_\\__,_|___/'
     msg_inf '                                            '
     msg_inf ' 3X-UI Pro with Advanced Routing & REALITY '
-    msg_inf ' Version: 1.1.0                             '
+    msg_inf ' Version: 1.2.0                             '
     echo
 }
 
@@ -160,10 +160,17 @@ PANEL_PASSWORD="${PANEL_PASSWORD:-}"
 CERT_PATH="${CERT_PATH:-}"
 KEY_PATH="${KEY_PATH:-}"
 
+# REALITY — set by create-inbounds.sh
+REALITY_LISTEN_PORT="${REALITY_LISTEN_PORT:-}"
+REALITY_PUBLIC_KEY=""
+REALITY_SHORT_ID=""
+REALITY_CLIENT_ID=""
+
 # Optional integrations
 TELEGRAM_BOT_TOKEN="${TELEGRAM_BOT_TOKEN:-}"
 TELEGRAM_ADMIN_ID="${TELEGRAM_ADMIN_ID:-}"
 CLOUDFLARE_EMAIL="${CLOUDFLARE_EMAIL:-}"
+UPDATE_GEOFILES="${UPDATE_GEOFILES:-y}"
 
 # --- Parse arguments ---
 
