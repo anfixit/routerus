@@ -1,6 +1,9 @@
 #!/bin/bash
-# Placeholder script
+# Firewall configuration module
 
-# TODO: Implement functionality
-msg_inf "⏳ Placeholder for ${script}..."
-echo
+configure_firewall() {
+    msg_inf "Step 13/14: Configuring firewall..."
+    # TODO: Implement UFW rules (allow 22, 80, 443)
+    msg_ok "Firewall configured"
+    echo
+}

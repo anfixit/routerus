@@ -2,253 +2,99 @@
 
 ```
 routerus/
-│
 ├── .github/
 │   └── workflows/
-│       └── validate.yml          # CI/CD для проверки синтаксиса скриптов
-│
-├── .ropeproject/                 # IDE конфигурация (игнорируется git)
+│       └── validate.yml          # CI: ShellCheck, JSON validation
 │
 ├── configs/
-│   └── routing/                  # Шаблоны конфигураций маршрутизации
-│       ├── base-routing.json     # Базовый шаблон роутинга
-│       ├── adblock-rule.json     # Правила блокировки рекламы
-│       ├── ru-direct-rule.json   # Правила прямого роутинга для РФ
-│       └── quic-block-rule.json  # Правила блокировки QUIC
+│   └── routing/
+│       ├── base-routing.json     # Base routing template
+│       ├── adblock-rule.json     # Ad/tracker blocking rules
+│       ├── ru-direct-rule.json   # Russian domain split-routing rules
+│       └── quic-block-rule.json  # QUIC/HTTP3 blocking rules
 │
-├── scripts/                      # Модульные скрипты установки
-│   ├── helpers.sh               # Вспомогательные функции
-│   ├── system-update.sh         # Обновление системы
-│   ├── cleanup.sh               # Очистка старых установок
-│   ├── domain-setup.sh          # Настройка доменов
-│   ├── routing-config.sh        # Конфигурация роутинга
-│   ├── install-packages.sh      # Установка пакетов
-│   ├── install-xui.sh           # Установка 3X-UI
-│   ├── ssl-setup.sh             # Настройка SSL
-│   ├── db-config.sh             # Конфигурация БД
-│   ├── setup-routing.sh         # Применение правил роутинга
-│   ├── nginx-config.sh          # Настройка Nginx
-│   ├── create-inbounds.sh       # Создание inbound'ов
-│   ├── optimize.sh              # Оптимизация системы (BBR)
-│   ├── firewall.sh              # Настройка UFW
-│   ├── cron-setup.sh            # Настройка cron задач
-│   ├── show-results.sh          # Вывод результатов
-│   └── uninstall.sh             # Удаление RouteRus
+├── scripts/
+│   ├── helpers.sh               # Shared utility functions
+│   ├── system-update.sh         # System package updates
+│   ├── cleanup.sh               # Remove old installations
+│   ├── domain-setup.sh          # Domain configuration
+│   ├── routing-config.sh        # Routing feature selection
+│   ├── install-packages.sh      # Dependency installation
+│   ├── install-xui.sh           # 3X-UI installation
+│   ├── ssl-setup.sh             # SSL certificate setup
+│   ├── db-config.sh             # Database configuration
+│   ├── setup-routing.sh         # Apply routing rules
+│   ├── nginx-config.sh          # Nginx reverse proxy
+│   ├── create-inbounds.sh       # Create VPN inbounds
+│   ├── optimize.sh              # BBR and kernel optimization
+│   ├── firewall.sh              # UFW firewall
+│   ├── cron-setup.sh            # Automated cron tasks
+│   ├── show-results.sh          # Display installation results
+│   └── uninstall.sh             # Uninstall script
 │
-├── services/                     # Systemd service files (будущее)
-│
-├── docs/                         # Дополнительная документация (будущее)
-│
-├── .env.example                  # Пример конфигурации
-├── .gitignore                    # Git ignore правила
-├── .gitattributes                # Git атрибуты
-├── LICENSE                       # MIT лицензия с благодарностями
-├── README.md                     # Главная документация
-├── CHANGELOG.md                  # История изменений
-├── install.sh                    # Главный установочный скрипт
-└── quick-install.sh              # Быстрая установка (одна команда)
+├── .editorconfig                # Editor formatting rules
+├── .env.example                 # Configuration template
+├── .gitattributes               # Git text handling
+├── .gitignore                   # Git ignore rules
+├── .shellcheckrc                # ShellCheck configuration
+├── CHANGELOG.md                 # Version history
+├── CONTRIBUTING.md              # Contribution guidelines
+├── LICENSE                      # MIT license
+├── README.md                    # Main documentation
+├── STRUCTURE.md                 # This file
+├── install.sh                   # Main installation orchestrator
+└── quick-install.sh             # One-command installer
 ```
 
-## Описание компонентов
-
-### Главные файлы
-
-- **install.sh** - Основной модульный установочный скрипт
-  - Вызывает все модули по порядку
-  - Поддерживает аргументы командной строки
-  - Обрабатывает интерактивный и автоматический режимы
-
-- **quick-install.sh** - Упрощенная установка
-  - Скачивает и запускает install.sh
-  - Используется для одной команды: `bash <(wget -qO- ...)`
-
-### Модули scripts/
-
-Каждый модуль отвечает за свою часть установки:
-
-1. **helpers.sh** - Общие функции
-   - Цветной вывод (msg_ok, msg_err, msg_inf, msg_warn)
-   - Генерация случайных строк и портов
-   - Проверка доступности портов
-   - Backup функции
-
-2. **system-update.sh** - Обновление Ubuntu
-   - `apt update && apt upgrade`
-   - Очистка пакетов
-
-3. **cleanup.sh** - Удаление старых установок
-   - Остановка сервисов
-   - Удаление файлов 3X-UI
-   - Очистка Nginx конфигов
-
-4. **domain-setup.sh** - Конфигурация доменов
-   - Интерактивный ввод или из аргументов
-   - Валидация DNS
-   - Инструкции по DuckDNS
-
-5. **routing-config.sh** - Выбор опций роутинга
-   - Блокировка рекламы
-   - Российский роутинг
-   - Блокировка QUIC
-
-6. **install-packages.sh** - Установка зависимостей
-   - nginx, certbot, sqlite3, ufw
-   - netcat, jq, wget, curl
-
-7. **install-xui.sh** - Установка 3X-UI
-   - Определение архитектуры
-   - Скачивание последней версии через GitHub API
-   - Установка systemd service
-
-8. **ssl-setup.sh** - SSL сертификаты
-   - Certbot + Let's Encrypt
-   - Автоматическое обновление
-
-9. **db-config.sh** - Настройка базы данных
-   - Обновление портов и путей
-   - **ФИКС:** subDomain и webDomain для Telegram бота
-   - Конфигурация подписок
-
-10. **setup-routing.sh** - Применение правил роутинга
-    - Чтение шаблонов из configs/routing/
-    - Генерация финального config.json
-    - Обновление GeoIP/GeoSite баз
-
-11. **nginx-config.sh** - Конфигурация Nginx
-    - Stream модуль для SNI routing
-    - Reverse proxy для панели
-    - Фейковый сайт на порту 9443
-
-12. **create-inbounds.sh** - Создание inbound'ов
-    - VLESS + REALITY
-    - VLESS + WebSocket (опционально)
-    - Генерация ключей
-
-13. **optimize.sh** - Оптимизация системы
-    - Включение BBR
-    - Настройка sysctl параметров
-
-14. **firewall.sh** - UFW firewall
-    - Разрешение портов 22, 80, 443
-    - Блокировка всего остального
-
-15. **cron-setup.sh** - Cron задачи
-    - Автообновление SSL
-    - Перезапуск сервисов
-
-16. **show-results.sh** - Вывод результатов
-    - Красивый финальный экран
-    - Учетные данные
-    - Следующие шаги
-
-17. **uninstall.sh** - Удаление RouteRus
-    - Полная очистка системы
-
-### Конфигурации configs/routing/
-
-Шаблоны JSON для разных типов маршрутизации:
-
-- **base-routing.json** - Базовая структура
-- **adblock-rule.json** - Блокировка рекламы (из работы @Corvus-Malus)
-- **ru-direct-rule.json** - Российский роутинг (из работы @Corvus-Malus)
-- **quic-block-rule.json** - Блокировка QUIC (из работы @Corvus-Malus)
-
-## Workflow установки
+## Installation workflow
 
 ```
-1. quick-install.sh → скачивает install.sh
-2. install.sh → вызывает модули:
-   ├─ helpers.sh (загрузка функций)
-   ├─ system-update.sh
-   ├─ cleanup.sh
-   ├─ domain-setup.sh
-   ├─ routing-config.sh
-   ├─ install-packages.sh
-   ├─ install-xui.sh
-   ├─ ssl-setup.sh
-   ├─ db-config.sh
-   ├─ setup-routing.sh (читает configs/routing/*.json)
-   ├─ nginx-config.sh
-   ├─ create-inbounds.sh
-   ├─ optimize.sh
-   ├─ firewall.sh
-   ├─ cron-setup.sh
-   └─ show-results.sh
+quick-install.sh -> downloads install.sh
+  install.sh -> loads helpers.sh, then runs modules:
+    1. system-update.sh
+    2. cleanup.sh
+    3. domain-setup.sh
+    4. routing-config.sh
+    5. install-packages.sh
+    6. install-xui.sh
+    7. ssl-setup.sh
+    8. db-config.sh
+    9. setup-routing.sh  (reads configs/routing/*.json)
+    10. nginx-config.sh
+    11. create-inbounds.sh
+    12. optimize.sh
+    13. firewall.sh
+    14. cron-setup.sh
+    15. show-results.sh
 ```
 
-## Расширение проекта
+## Conventions
 
-### Добавление нового модуля
+### Naming
+- Script files: `kebab-case.sh`
+- Functions: `snake_case`
+- Variables: `UPPERCASE` for globals, `lowercase` for locals
 
-1. Создать `/scripts/new-module.sh`
-2. Добавить функцию с понятным именем
-3. Вызвать в `install.sh` в нужном месте
-4. Обновить STRUCTURE.md
+### Code style
+- All scripts start with `#!/bin/bash`
+- Use `set -euo pipefail` where appropriate
+- Quote all variable expansions: `"${var}"`
+- Use `[[ ]]` instead of `[ ]` for conditionals
+- Validate with `shellcheck` before committing
 
-### Добавление новых правил роутинга
+### Adding a new module
+1. Create `scripts/new-module.sh` with a named function
+2. Add the `module:function` entry to the `steps` array in `install.sh`
+3. Update this file
 
-1. Создать `/configs/routing/new-rule.json`
-2. Добавить логику в `setup-routing.sh`
-3. Добавить опцию в `routing-config.sh`
-
-## Соглашения
-
-### Именование
-
-- Файлы скриптов: `kebab-case.sh`
-- Функции: `snake_case`
-- Переменные: `UPPERCASE` для глобальных, `lowercase` для локальных
-
-### Комментарии
-
-```bash
-#!/bin/bash
-# Краткое описание модуля
-
-function_name() {
-    # Описание функции
-    local var="value"
-    # Комментарий к логике
-}
-```
-
-### Сообщения
-
-```bash
-msg_inf "ℹ️  Информация"
-msg_ok "✓ Успех"
-msg_warn "⚠️  Предупреждение"
-msg_err "❌ Ошибка"
-```
+### Adding routing rules
+1. Create `configs/routing/new-rule.json`
+2. Add assembly logic in `setup-routing.sh`
+3. Add a toggle option in `routing-config.sh`
 
 ## CI/CD
 
-GitHub Actions проверяет:
-- Синтаксис всех .sh файлов (shellcheck)
-- Валидность JSON конфигов
-- Bash syntax check
-
-## Будущие улучшения
-
-- [ ] Docker версия
-- [ ] Ansible playbook
-- [ ] Web UI для управления
-- [ ] Централизованное логирование
-- [ ] Prometheus метрики
-- [ ] Автотесты
-- [ ] Multi-language README
-
-## Вклад в проект
-
-При добавлении кода:
-
-1. Следуйте структуре проекта
-2. Комментируйте код
-3. Обновляйте STRUCTURE.md
-4. Проверяйте синтаксис: `shellcheck script.sh`
-5. Тестируйте на чистой Ubuntu 24.04
-
----
-
-**Архитектура:** Модульная, расширяемая, понятная  
-**Вдохновение:** Unix philosophy - делай одно, делай хорошо
+GitHub Actions validates on every push:
+- ShellCheck on all `.sh` files
+- Bash syntax check (`bash -n`)
+- JSON config validation (`jq empty`)

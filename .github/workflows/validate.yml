@@ -2,46 +2,47 @@ name: Shell Script Validation
 
 on:
   push:
-    branches: [ main, develop ]
+    branches: [main, develop]
   pull_request:
-    branches: [ main ]
+    branches: [main]
+
+permissions:
+  contents: read
 
 jobs:
   shellcheck:
-    name: Shellcheck
+    name: ShellCheck
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v3
-      
-      - name: Run ShellCheck
-        uses: ludeeus/action-shellcheck@master
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+
+      - name: Run ShellCheck on scripts/
+        uses: ludeeus/action-shellcheck@00cae500b08a931fb5698e11e79bfbd38e612a38 # v2.0.0
         with:
           scandir: './scripts'
-          
-      - name: Check install.sh
-        run: shellcheck install.sh quick-install.sh || true
+
+      - name: Run ShellCheck on root scripts
+        run: shellcheck install.sh quick-install.sh
 
   syntax-check:
     name: Bash Syntax Check
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v3
-      
-      - name: Check syntax of all scripts
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+
+      - name: Validate bash syntax
         run: |
           find . -name "*.sh" -type f -exec bash -n {} \;
-          echo "✅ All scripts have valid syntax"
 
   json-validation:
     name: JSON Validation
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v3
-      
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+
       - name: Validate JSON configs
         run: |
           for file in configs/routing/*.json; do
-            echo "Checking $file"
-            jq empty "$file" || exit 1
+            echo "Checking ${file}"
+            jq empty "${file}" || exit 1
           done
-          echo "✅ All JSON configs are valid"

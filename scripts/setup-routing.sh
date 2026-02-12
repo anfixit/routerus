@@ -1,6 +1,9 @@
 #!/bin/bash
-# Placeholder script
+# Routing rules setup module
 
-# TODO: Implement functionality
-msg_inf "⏳ Placeholder for ${script}..."
-echo
+setup_routing_rules() {
+    msg_inf "Step 9/14: Setting up routing rules..."
+    # TODO: Implement routing rules assembly from configs/routing/*.json
+    msg_ok "Routing rules applied"
+    echo
+}

@@ -1,21 +1,12 @@
-# Python
-__pycache__/
-*.py[cod]
-*$py.class
-*.so
-.Python
-.ropeproject/
-
 # Environment
 .env
 .env.local
 .env.*.local
-venv/
-ENV/
 
 # IDE
 .vscode/
 .idea/
+.ropeproject/
 *.swp
 *.swo
 *~
@@ -28,8 +19,8 @@ Thumbs.db
 *.log
 logs/
 
-# Backups
-*.backup
+# Backups created by helpers.sh
+*.backup.*
 *.bak
 *.old
 
@@ -43,8 +34,3 @@ logs/
 *.crt
 *.db
 *.sqlite
-
-# Node
-node_modules/
-npm-debug.log
-yarn-error.log
