@@ -1,6 +1,8 @@
 #!/bin/bash
-# Placeholder script
+# Installation results display module
 
-# TODO: Implement functionality
-msg_inf "⏳ Placeholder for ${script}..."
-echo
+show_installation_results() {
+    msg_ok "RouteRus Installation Complete!"
+    echo
+    # TODO: Implement display of panel URL, credentials, routing status
+}

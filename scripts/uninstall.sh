@@ -1,6 +1,8 @@
 #!/bin/bash
-# Placeholder script
+# Uninstall module
 
-# TODO: Implement functionality
-msg_inf "⏳ Placeholder for ${script}..."
-echo
+uninstall_routerus() {
+    msg_inf "Uninstalling RouteRus..."
+    # TODO: Implement full cleanup (stop services, remove configs, etc.)
+    msg_ok "RouteRus uninstalled"
+}

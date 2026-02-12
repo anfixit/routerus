@@ -1,0 +1,5 @@
+# Default shell dialect
+shell=bash
+
+# Allow sourcing from paths that can't be followed
+external-sources=true

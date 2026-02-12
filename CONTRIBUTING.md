@@ -1,109 +1,54 @@
 # Contributing to RouteRus
 
-Спасибо за интерес к RouteRus! Мы приветствуем любой вклад в проект.
+## Reporting bugs
 
-## Как внести вклад
+1. Check [Issues](https://github.com/anfixit/routerus/issues) first
+2. Create a new issue with:
+   - Problem description
+   - Steps to reproduce
+   - Expected vs actual behavior
+   - Ubuntu and RouteRus versions
+   - Relevant logs
 
-### Сообщения об ошибках
+## Feature requests
 
-1. Проверьте [Issues](https://github.com/anfixit/routerus/issues), возможно проблема уже обсуждается
-2. Создайте новый Issue с:
-   - Описанием проблемы
-   - Шагами для воспроизведения
-   - Ожидаемым поведением
-   - Фактическим поведением
-   - Версией Ubuntu и RouteRus
-   - Логами (если есть)
+1. Create an issue with the `enhancement` label
+2. Describe: why it's needed, how it should work, usage examples
 
-### Предложения функций
+## Pull requests
 
-1. Создайте Issue с тегом `enhancement`
-2. Опишите:
-   - Зачем нужна функция
-   - Как она должна работать
-   - Примеры использования
+1. Fork the repository
+2. Create a feature branch: `git checkout -b feature/my-feature`
+3. Make your changes
+4. Run `shellcheck` on all modified scripts
+5. Test on a clean Ubuntu 24.04 installation
+6. Commit using [Conventional Commits](https://www.conventionalcommits.org/):
+   - `feat:` new feature
+   - `fix:` bug fix
+   - `docs:` documentation changes
+   - `refactor:` code restructuring
+   - `chore:` maintenance tasks
+7. Push and open a pull request
 
-### Pull Requests
+## Code standards
 
-1. Fork репозитория
-2. Создайте feature branch: `git checkout -b feature/amazing-feature`
-3. Внесите изменения
-4. Убедитесь что код работает
-5. Commit: `git commit -m 'Add amazing feature'`
-6. Push: `git push origin feature/amazing-feature`
-7. Создайте Pull Request
+### Shell scripts
+- Start with `#!/bin/bash`
+- Use `set -euo pipefail`
+- Quote all variables: `"${var}"`
+- Use `[[ ]]` instead of `[ ]`
+- Validate with `shellcheck`
+- Use functions from `helpers.sh` for output formatting
 
-## Стандарты кода
+### JSON configs
+- Validate with `jq empty config.json`
+- Use 2-space indentation
 
-### Shell Scripts
+## Project structure
 
-- Используйте `#!/bin/bash` в начале
-- Проверяйте синтаксис: `shellcheck script.sh`
-- Комментируйте сложную логику
-- Используйте функции из `helpers.sh`
-- Обрабатывайте ошибки
+See [STRUCTURE.md](STRUCTURE.md).
 
-**Пример:**
-```bash
-#!/bin/bash
-# Description of the script
-
-source "$(dirname "$0")/helpers.sh"
-
-my_function() {
-    msg_inf "Starting operation..."
-    
-    if ! command_exists "some_command"; then
-        msg_err "Required command not found"
-        return 1
-    fi
-    
-    # Do something
-    
-    msg_ok "Operation completed!"
-}
-```
-
-### JSON Configs
-
-- Валидируйте: `jq empty config.json`
-- Используйте 2 пробела для отступов
-- Комментируйте нестандартные параметры
-
-### Commit Messages
-
-Следуйте [Conventional Commits](https://www.conventionalcommits.org/):
-
-- `feat:` - новая функция
-- `fix:` - исправление бага
-- `docs:` - изменения в документации
-- `style:` - форматирование
-- `refactor:` - рефакторинг
-- `test:` - тесты
-- `chore:` - рутинные задачи
-
-**Примеры:**
-```
-feat: add Cloudflare DNS support
-fix: correct domain validation in SSL setup
-docs: update README with new routing options
-```
-
-## Тестирование
-
-Перед PR тестируйте на:
-- Чистой Ubuntu 24.04
-- С разными комбинациями опций
-- В интерактивном и автоматическом режиме
-
-## Структура проекта
-
-См. [STRUCTURE.md](STRUCTURE.md) для понимания архитектуры.
-
-## Вопросы?
+## Questions?
 
 - GitHub Discussions
-- Issues с тегом `question`
-- Telegram: @crazy_day_admin
-
-Спасибо за вклад! 🚀
+- Issues with the `question` label
