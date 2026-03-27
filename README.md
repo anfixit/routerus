@@ -177,6 +177,8 @@
 2. Порт: `2222`
 3. Нажми **«Important information»** → скопируй **SECRET KEY** (строка `eyJ...`)
 
+> **Config Profile создаётся позже** — скрипт сам сгенерирует Reality ключи (`privateKey` / `publicKey`) и выведет их на экран с паузой. В этот момент ты создаёшь Config Profile в панели, вставляешь ключи — и продолжаешь установку.
+
 Теперь можно запускать скрипт на сервере.
 
 ---
@@ -225,6 +227,7 @@ mynode-sni.duckdns.org  → IP сервера   (SNI domain для Reality)
 | SSH | Опциональная смена порта |
 | SSL | Let's Encrypt через certbot standalone для обоих доменов |
 | nginx | Stream SNI routing: `443 → 8443` (Xray) / `7443` (HTTPS) |
+| **Генерация ключей** | **x25519 PrivateKey/PublicKey + пауза для создания Config Profile** |
 | remnawave-node | Docker compose, `NET_ADMIN`, `ulimits 1048576` |
 | geosite/geoip | runetfreedom, монтируются в контейнер, cron обновление в 03:00 |
 | Node Exporter | Prometheus метрики, доступны только с IP мастера |

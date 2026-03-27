@@ -14,12 +14,13 @@
 #   4  SSH-порт (опционально)
 #   5  SSL-сертификаты (certbot standalone)
 #   6  nginx (stream SNI: 443 → 8443/7443, Reality fallback → 9443)
-#   7  remnawave-node (docker compose)
-#   8  geosite.dat + geoip.dat (runetfreedom) + cron автообновление
-#   9  Node Exporter для Prometheus
-#  10  Fake site (randomfakehtml.sh)
-#  11  UFW
-#  12  Итоговый вывод
+#   7  Генерация Reality ключей + пауза для создания Config Profile
+#   8  remnawave-node (docker compose)
+#   9  geosite.dat + geoip.dat (runetfreedom) + cron автообновление
+#  10  Node Exporter для Prometheus
+#  11  Fake site (randomfakehtml.sh)
+#  12  UFW
+#  13  Итоговый вывод
 # =============================================================================
 
 set -euo pipefail
@@ -327,7 +328,56 @@ EOF
 }
 
 # =============================================================================
-# ФАЗА 7: remnawave-node
+# ФАЗА 7: Генерация Reality ключей
+# =============================================================================
+XRAY_PRIVATE_KEY=""
+XRAY_PUBLIC_KEY=""
+
+phase7_keygen() {
+    title "Фаза 7 / Генерация Reality ключей"
+
+    info "Генерирую ключевую пару x25519..."
+    local output
+    output=$(docker run --rm remnawave/node:latest xray x25519 2>/dev/null) \
+        || die "Не удалось запустить xray x25519. Проверь Docker."
+
+    XRAY_PRIVATE_KEY=$(echo "$output" | grep "^PrivateKey:" | awk '{print $2}')
+    XRAY_PUBLIC_KEY=$(echo "$output"  | grep "^Password:"   | awk '{print $2}')
+
+    [[ -z "$XRAY_PRIVATE_KEY" ]] && die "Не удалось получить PrivateKey"
+
+    echo ""
+    echo -e "${G}  ╔══════════════════════════════════════════════════════════════╗${NC}"
+    echo -e "${G}  ║              Ключи для Config Profile в панели              ║${NC}"
+    echo -e "${G}  ╚══════════════════════════════════════════════════════════════╝${NC}"
+    echo ""
+    echo -e "  ${B}PrivateKey${NC} (вставить в privateKey Config Profile):"
+    echo -e "  ${Y}${XRAY_PRIVATE_KEY}${NC}"
+    echo ""
+    echo -e "  ${B}PublicKey${NC}  (для справки / клиентских конфигов):"
+    echo -e "  ${C}${XRAY_PUBLIC_KEY}${NC}"
+    echo ""
+    echo -e "  ${B}SNI domain${NC} (вставить в serverNames Config Profile):"
+    echo -e "  ${C}${SNI_DOMAIN}${NC}"
+    echo ""
+    echo "  ┌──────────────────────────────────────────────────────────────┐"
+    echo "  │  Сейчас открой панель Remnawave и создай Config Profile:     │"
+    echo "  │                                                              │"
+    echo "  │  1. Config Profiles → Add profile                           │"
+    echo "  │  2. Вставь шаблон из README                                 │"
+    echo "  │  3. Замени privateKey на ключ выше                          │"
+    echo "  │  4. Замени serverNames на: ${SNI_DOMAIN}         │"
+    echo "  │  5. Сохрани профиль                                         │"
+    echo "  │                                                              │"
+    echo "  │  После этого нажми Enter чтобы продолжить установку         │"
+    echo "  └──────────────────────────────────────────────────────────────┘"
+    echo ""
+    read -rp "  Нажми Enter когда Config Profile создан..." _
+    ok "Продолжаем установку"
+}
+
+# =============================================================================
+# ФАЗА 8: remnawave-node
 # =============================================================================
 phase7_node() {
     title "Фаза 7 / remnawave-node"
@@ -368,7 +418,7 @@ EOF
 }
 
 # =============================================================================
-# ФАЗА 8: geosite/geoip + автообновление
+# ФАЗА 9: geosite/geoip + автообновление
 # =============================================================================
 phase8_geo() {
     title "Фаза 8 / geosite + geoip (runetfreedom)"
@@ -521,7 +571,7 @@ main() {
     clear
     echo -e "${C}"
     echo "  ┌─────────────────────────────────────────────────────┐"
-    echo "  │        remnawave-node  •  deploy script  v1.1       │"
+    echo "  │        remnawave-node  •  deploy script  v1.2       │"
     echo "  │        Ubuntu 24.04  •  Xray  •  nginx  •  ufw      │"
     echo "  │        github.com/anfixit/routerus                  │"
     echo "  └─────────────────────────────────────────────────────┘"
@@ -534,6 +584,7 @@ main() {
     phase4_ssh
     phase5_ssl
     phase6_nginx
+    phase7_keygen
     phase7_node
     phase8_geo
     phase9_node_exporter
