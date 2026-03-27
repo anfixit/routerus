@@ -1,24 +1,25 @@
 #!/usr/bin/env bash
 # =============================================================================
-# deploy-remnanode.sh
-# Разворачивает remnawave-node на чистом Ubuntu 24.04
+# deploy-remnanode.sh — Развёртывание remnawave-node на Ubuntu 24.04
+# github.com/anfixit/routerus
 #
 # Запуск:
-#   bash <(wget -qO- https://raw.githubusercontent.com/ТВОЙ_НИК/РЕПО/main/deploy-remnanode.sh)
+#   bash <(wget -qO- https://raw.githubusercontent.com/anfixit/routerus/main/deploy-remnanode.sh)
 #
 # Фазы:
 #   0  Проверки (root, Ubuntu 24)
-#   1  Интерактивный ввод (SECRET_KEY, домены, порты)
-#   2  Зависимости (docker, ufw, nginx, certbot)
-#   3  SSH-порт
-#   4  SSL-сертификаты (certbot standalone)
-#   5  nginx (stream SNI: 443 → 8443 / 7443 / 9443)
-#   6  remnawave-node (docker compose)
-#   7  geosite/geoip dat + cron-автообновление
-#   8  Node Exporter для Prometheus
-#   9  Fake site (randomfakehtml.sh)
-#  10  UFW (финальные правила)
-#  11  Итоговый вывод с инструкцией
+#   1  Интерактивный ввод параметров
+#   2  Обновление системы + зависимости
+#   3  Docker
+#   4  SSH-порт (опционально)
+#   5  SSL-сертификаты (certbot standalone)
+#   6  nginx (stream SNI: 443 → 8443/7443, Reality fallback → 9443)
+#   7  remnawave-node (docker compose)
+#   8  geosite.dat + geoip.dat (runetfreedom) + cron автообновление
+#   9  Node Exporter для Prometheus
+#  10  Fake site (randomfakehtml.sh)
+#  11  UFW
+#  12  Итоговый вывод
 # =============================================================================
 
 set -euo pipefail
@@ -33,7 +34,7 @@ warn()  { echo -e "${Y}  !${NC} $*"; }
 die()   { echo -e "${R}  ✗ ОШИБКА:${NC} $*" >&2; exit 1; }
 title() { echo -e "\n${B}══ $* ══${NC}"; }
 
-# ── Глобальные переменные (заполняются в phase1) ──────────────────────────────
+# ── Переменные ────────────────────────────────────────────────────────────────
 SECRET_KEY=""
 CONNECTION_DOMAIN=""
 SNI_DOMAIN=""
@@ -43,6 +44,7 @@ MASTER_IP="151.244.72.28"
 SERVER_IP=""
 NODE_DIR="/opt/remnanode"
 XRAY_SHARE="/usr/local/share/xray"
+GEO_BASE="https://github.com/runetfreedom/russia-v2ray-rules-dat/releases/latest/download"
 NODE_EXPORTER_VER="1.9.1"
 
 # =============================================================================
@@ -51,7 +53,7 @@ NODE_EXPORTER_VER="1.9.1"
 phase0_checks() {
     title "Фаза 0 / Проверки"
 
-    [[ $EUID -eq 0 ]] || die "Запускай от root: sudo su - && bash ..."
+    [[ $EUID -eq 0 ]] || die "Запускай от root: sudo su -"
 
     local ver
     ver=$(grep -oP '(?<=VERSION_ID=")[^"]+' /etc/os-release 2>/dev/null || echo "unknown")
@@ -59,55 +61,52 @@ phase0_checks() {
 
     SERVER_IP=$(ip route get 8.8.8.8 2>/dev/null | grep -Po 'src \K\S+' | head -1 \
                 || curl -s4 ifconfig.me | tr -d '[:space:]')
-
     ok "IP сервера: $SERVER_IP"
-    ok "Проверки пройдены"
 }
 
 # =============================================================================
-# ФАЗА 1: Интерактивный ввод параметров
+# ФАЗА 1: Интерактивный ввод
 # =============================================================================
 phase1_input() {
     title "Фаза 1 / Параметры"
 
-    # ── SECRET_KEY ────────────────────────────────────────────────────────────
+    # SECRET KEY
     echo ""
     echo -e "${B}  Шаг 1: SECRET KEY из Remnawave панели${NC}"
     echo "  ┌──────────────────────────────────────────────────────────────┐"
     echo "  │  1. Открой панель Remnawave                                  │"
-    echo "  │  2. Перейди: Nodes → Add node                                │"
-    echo "  │  3. Заполни имя ноды и порт (по умолчанию: 2222)            │"
-    echo "  │  4. Нажми кнопку «Important information»                     │"
-    echo "  │  5. Скопируй SECRET KEY (длинная строка eyJ...)              │"
+    echo "  │  2. Nodes → Add node                                         │"
+    echo "  │  3. Заполни имя ноды (формат: СТРАНА_название)              │"
+    echo "  │     Например: DE_mynode, NL_amsterdam, AT_vienna             │"
+    echo "  │  4. Порт ноды: 2222 (или свой)                              │"
+    echo "  │  5. Нажми «Important information» → скопируй SECRET KEY     │"
     echo "  └──────────────────────────────────────────────────────────────┘"
     echo ""
     while [[ -z "$SECRET_KEY" ]]; do
-        read -rp "  SECRET KEY: " SECRET_KEY
+        read -rp "  SECRET KEY (eyJ...): " SECRET_KEY
         [[ -z "$SECRET_KEY" ]] && warn "Ключ не может быть пустым"
     done
 
-    # ── Домены ────────────────────────────────────────────────────────────────
+    # Домены
     echo ""
     echo -e "${B}  Шаг 2: Домены${NC}"
-    echo "  Нужно два домена/поддомена → оба должны быть направлены на IP: $SERVER_IP"
+    echo "  Нужно 2 домена/поддомена → оба направить на IP: $SERVER_IP"
     echo ""
-    echo "  Где взять бесплатно:"
-    echo -e "    ${G}★${NC} duckdns.org   — вход через GitHub или Google, до 5 поддоменов"
-    echo "       Пример: mynode.duckdns.org, mynode-sni.duckdns.org"
-    echo "    • dynu.com      — поддерживает IPv6, свои домены"
-    echo "    • afraid.org    — 5 поддоменов, 55 000+ доменных зон"
-    echo "    • noip.com      — 3 хоста, нужно подтверждать раз в 30 дней"
+    echo "  Бесплатные DNS-сервисы:"
+    echo -e "    ${G}★${NC} duckdns.org   — вход через GitHub/Google, до 5 поддоменов"
+    echo "       Пример: mynode.duckdns.org и mynode-sni.duckdns.org"
+    echo "    • dynu.com      — IPv6, поддержка своих доменов"
+    echo "    • afraid.org    — 5 поддоменов, 55 000+ зон"
+    echo "    • noip.com      — 3 хоста, подтверждение раз в 30 дней"
     echo ""
-    echo "  Домен 1 — connection domain (для подключения клиентов)"
-    echo "  Пример: mynode.duckdns.org"
+    echo "  Домен 1 — connection domain (адрес для подключения клиентов)"
     while [[ -z "$CONNECTION_DOMAIN" ]]; do
         read -rp "  Connection domain: " CONNECTION_DOMAIN
         [[ -z "$CONNECTION_DOMAIN" ]] && warn "Домен не может быть пустым"
     done
 
     echo ""
-    echo "  Домен 2 — SNI domain (для маскировки Reality, должен отличаться от первого)"
-    echo "  Пример: mynode-sni.duckdns.org"
+    echo "  Домен 2 — SNI domain (маскировка Reality, должен отличаться)"
     while [[ -z "$SNI_DOMAIN" ]]; do
         read -rp "  SNI domain: " SNI_DOMAIN
         [[ -z "$SNI_DOMAIN" ]] && warn "Домен не может быть пустым"
@@ -115,71 +114,82 @@ phase1_input() {
             warn "SNI domain должен отличаться от connection domain" && SNI_DOMAIN=""
     done
 
-    # ── Порт ноды ─────────────────────────────────────────────────────────────
+    # Порт ноды
     echo ""
     read -rp "  Порт remnawave-node [${NODE_PORT}]: " _port
     [[ -n "$_port" ]] && NODE_PORT="$_port"
 
-    # ── SSH-порт ──────────────────────────────────────────────────────────────
+    # SSH порт
     echo ""
     echo "  SSH-порт: рекомендуется сменить с 22 для защиты от сканеров"
     read -rp "  Новый SSH-порт [Enter — оставить 22]: " _ssh
     [[ -n "$_ssh" ]] && SSH_PORT="$_ssh"
 
-    # ── IP мастера ────────────────────────────────────────────────────────────
+    # IP мастера
     echo ""
     read -rp "  IP мастер-сервера для Node Exporter [${MASTER_IP}]: " _master
     [[ -n "$_master" ]] && MASTER_IP="$_master"
 
-    # ── Итог ─────────────────────────────────────────────────────────────────
+    # Подтверждение
     echo ""
-    echo -e "${B}  Итоговые параметры:${NC}"
-    echo "  ─────────────────────────────────────────────"
+    echo -e "${B}  Параметры:${NC}"
+    echo "  ──────────────────────────────────────────────"
     printf "  %-24s %s\n" "Connection domain:"  "$CONNECTION_DOMAIN"
     printf "  %-24s %s\n" "SNI domain:"         "$SNI_DOMAIN"
     printf "  %-24s %s\n" "Node port:"          "$NODE_PORT"
     printf "  %-24s %s\n" "SSH port:"           "$SSH_PORT"
     printf "  %-24s %s\n" "Master IP:"          "$MASTER_IP"
-    printf "  %-24s %s...\n" "SECRET_KEY:"      "${SECRET_KEY:0:20}"
-    echo "  ─────────────────────────────────────────────"
+    printf "  %-24s %s...\n" "SECRET KEY:"      "${SECRET_KEY:0:20}"
+    echo "  ──────────────────────────────────────────────"
     echo ""
     read -rp "  Всё верно? [Y/n]: " _confirm
     [[ "${_confirm,,}" == "n" ]] && die "Отменено. Запусти скрипт заново."
-
     ok "Параметры приняты"
 }
 
 # =============================================================================
-# ФАЗА 2: Зависимости
+# ФАЗА 2: Обновление системы + зависимости
 # =============================================================================
 phase2_deps() {
     title "Фаза 2 / Зависимости"
 
     export DEBIAN_FRONTEND=noninteractive
     apt-get update -qq
+    apt-get upgrade -y -qq
     apt-get install -y -qq \
         curl wget ufw nginx certbot \
-        jq ca-certificates gnupg lsb-release
-
-    if ! command -v docker &>/dev/null; then
-        info "Устанавливаю Docker..."
-        curl -fsSL https://get.docker.com | sh
-        systemctl enable --now docker
-    else
-        ok "Docker уже установлен"
-    fi
-
-    docker compose version &>/dev/null \
-        || die "docker compose plugin не найден — переустанови Docker через get.docker.com"
+        ca-certificates gnupg lsb-release
 
     ok "Зависимости установлены"
 }
 
 # =============================================================================
-# ФАЗА 3: SSH-порт
+# ФАЗА 3: Docker
 # =============================================================================
-phase3_ssh() {
-    title "Фаза 3 / SSH"
+phase3_docker() {
+    title "Фаза 3 / Docker"
+
+    if command -v docker &>/dev/null; then
+        ok "Docker уже установлен: $(docker --version | grep -oP '[\d.]+' | head -1)"
+    else
+        info "Устанавливаю Docker..."
+        curl -fsSL https://get.docker.com | sh
+        systemctl enable --now docker
+        ok "Docker установлен"
+    fi
+
+    docker compose version &>/dev/null \
+        || die "docker compose plugin не найден. Переустанови Docker через get.docker.com"
+
+    # Сброс возможного failed-state
+    systemctl reset-failed docker 2>/dev/null || true
+}
+
+# =============================================================================
+# ФАЗА 4: SSH-порт
+# =============================================================================
+phase4_ssh() {
+    title "Фаза 4 / SSH"
 
     if [[ "$SSH_PORT" == "22" ]]; then
         ok "SSH-порт оставлен 22"
@@ -196,10 +206,10 @@ phase3_ssh() {
 }
 
 # =============================================================================
-# ФАЗА 4: SSL
+# ФАЗА 5: SSL
 # =============================================================================
-phase4_ssl() {
-    title "Фаза 4 / SSL-сертификаты"
+phase5_ssl() {
+    title "Фаза 5 / SSL-сертификаты"
 
     systemctl stop nginx 2>/dev/null || true
     fuser -k 80/tcp 2>/dev/null || true
@@ -221,10 +231,10 @@ phase4_ssl() {
 }
 
 # =============================================================================
-# ФАЗА 5: nginx
+# ФАЗА 6: nginx
 # =============================================================================
-phase5_nginx() {
-    title "Фаза 5 / nginx (stream SNI routing)"
+phase6_nginx() {
+    title "Фаза 6 / nginx (stream SNI routing)"
 
     mkdir -p /etc/nginx/stream-enabled
 
@@ -260,7 +270,7 @@ server {
 }
 EOF
 
-    # HTTP → HTTPS
+    # HTTP → HTTPS redirect
     cat > /etc/nginx/sites-available/80.conf << EOF
 server {
     listen 80;
@@ -269,7 +279,7 @@ server {
 }
 EOF
 
-    # HTTPS vhost для connection domain (fake site)
+    # HTTPS для connection domain (fake site)
     cat > "/etc/nginx/sites-available/${CONNECTION_DOMAIN}.conf" << EOF
 server {
     server_tokens off;
@@ -286,7 +296,7 @@ server {
 }
 EOF
 
-    # HTTPS vhost для SNI domain (Reality fallback 9443)
+    # HTTPS для SNI domain (Reality fallback)
     cat > "/etc/nginx/sites-available/${SNI_DOMAIN}.conf" << EOF
 server {
     server_tokens off;
@@ -313,16 +323,16 @@ EOF
 
     nginx -t || die "nginx config test failed"
     systemctl restart nginx
-    ok "nginx настроен (443 → 8443/7443, Reality fallback → 9443)"
+    ok "nginx настроен"
 }
 
 # =============================================================================
-# ФАЗА 6: remnawave-node
+# ФАЗА 7: remnawave-node
 # =============================================================================
-phase6_node() {
-    title "Фаза 6 / remnawave-node"
+phase7_node() {
+    title "Фаза 7 / remnawave-node"
 
-    mkdir -p "$NODE_DIR" /var/log/remnanode "$XRAY_SHARE"
+    mkdir -p "$NODE_DIR" "$NODE_DIR/geodata" /var/log/remnanode "$XRAY_SHARE"
 
     cat > "${NODE_DIR}/docker-compose.yml" << EOF
 services:
@@ -342,66 +352,68 @@ services:
       - NODE_PORT=${NODE_PORT}
       - SECRET_KEY=${SECRET_KEY}
     volumes:
+      - ${NODE_DIR}/geodata/geosite.dat:/usr/local/share/xray/geosite.dat:ro
+      - ${NODE_DIR}/geodata/geoip.dat:/usr/local/share/xray/geoip.dat:ro
       - /var/log/remnanode:/var/log/remnanode
-      - ${XRAY_SHARE}:/usr/local/share/xray
 EOF
-
-    systemctl reset-failed docker 2>/dev/null || true
 
     cd "$NODE_DIR"
     docker compose pull -q
     docker compose up -d
 
     sleep 5
-    if docker compose ps | grep -qiE "running|up"; then
-        ok "remnawave-node запущен на порту ${NODE_PORT}"
-    else
-        warn "Контейнер возможно ещё стартует. Проверь: docker compose -C $NODE_DIR logs -f"
-    fi
+    docker compose ps | grep -qiE "running|up" \
+        && ok "remnawave-node запущен (порт ${NODE_PORT})" \
+        || warn "Контейнер возможно ещё стартует. Проверь: docker compose -C $NODE_DIR logs -f"
 }
 
 # =============================================================================
-# ФАЗА 7: geosite/geoip dat
+# ФАЗА 8: geosite/geoip + автообновление
 # =============================================================================
-phase7_geo() {
-    title "Фаза 7 / geosite + geoip dat"
+phase8_geo() {
+    title "Фаза 8 / geosite + geoip (runetfreedom)"
 
-    local base="https://github.com/runetfreedom/russia-v2ray-rules-dat/releases/latest/download"
-
-    wget -qO "${XRAY_SHARE}/geosite.dat" "${base}/geosite.dat" \
+    info "Скачиваю geosite.dat..."
+    curl -fsSLo "${NODE_DIR}/geodata/geosite.dat" "${GEO_BASE}/geosite.dat" \
         || die "Не удалось скачать geosite.dat"
-    wget -qO "${XRAY_SHARE}/geoip.dat"   "${base}/geoip.dat"   \
+
+    info "Скачиваю geoip.dat..."
+    curl -fsSLo "${NODE_DIR}/geodata/geoip.dat" "${GEO_BASE}/geoip.dat" \
         || die "Не удалось скачать geoip.dat"
 
-    ok "geosite.dat и geoip.dat загружены → $XRAY_SHARE"
+    # Перезапуск ноды чтобы подхватила свежие файлы
+    cd "$NODE_DIR" && docker compose restart remnanode
+    ok "Геофайлы загружены (geosite: $(du -sh ${NODE_DIR}/geodata/geosite.dat | cut -f1), geoip: $(du -sh ${NODE_DIR}/geodata/geoip.dat | cut -f1))"
 
-    cat > /usr/local/bin/update-geo-dat.sh << 'GEOEOF'
+    # Скрипт автообновления
+    cat > /usr/local/bin/update-geo-dat.sh << GEOEOF
 #!/usr/bin/env bash
 set -euo pipefail
-XRAY_SHARE="/usr/local/share/xray"
 BASE="https://github.com/runetfreedom/russia-v2ray-rules-dat/releases/latest/download"
+DIR="${NODE_DIR}/geodata"
 LOG="/var/log/remnanode/geo-update.log"
-wget -qO "${XRAY_SHARE}/geosite.dat.new" "${BASE}/geosite.dat"
-wget -qO "${XRAY_SHARE}/geoip.dat.new"   "${BASE}/geoip.dat"
-mv "${XRAY_SHARE}/geosite.dat.new" "${XRAY_SHARE}/geosite.dat"
-mv "${XRAY_SHARE}/geoip.dat.new"   "${XRAY_SHARE}/geoip.dat"
-cd /opt/remnanode && docker compose restart remnanode
-echo "$(date '+%Y-%m-%d %H:%M:%S') geo dat updated" >> "$LOG"
+curl -fsSLo "\${DIR}/geosite.dat.new" "\${BASE}/geosite.dat"
+curl -fsSLo "\${DIR}/geoip.dat.new"   "\${BASE}/geoip.dat"
+mv "\${DIR}/geosite.dat.new" "\${DIR}/geosite.dat"
+mv "\${DIR}/geoip.dat.new"   "\${DIR}/geoip.dat"
+cd ${NODE_DIR} && docker compose restart remnanode
+echo "\$(date "+%Y-%m-%d %H:%M:%S") updated" >> "\$LOG"
 GEOEOF
 
     chmod +x /usr/local/bin/update-geo-dat.sh
 
+    # Cron: каждую ночь в 03:00
     (crontab -l 2>/dev/null | grep -v "update-geo-dat"; \
      echo "0 3 * * * /usr/local/bin/update-geo-dat.sh") | crontab -
 
-    ok "Автообновление dat: каждый день в 03:00"
+    ok "Автообновление dat настроено (cron: 0 3 * * *)"
 }
 
 # =============================================================================
-# ФАЗА 8: Node Exporter
+# ФАЗА 9: Node Exporter
 # =============================================================================
-phase8_node_exporter() {
-    title "Фаза 8 / Node Exporter"
+phase9_node_exporter() {
+    title "Фаза 9 / Node Exporter"
 
     if command -v node_exporter &>/dev/null; then
         ok "Node Exporter уже установлен"
@@ -437,21 +449,23 @@ EOF
 }
 
 # =============================================================================
-# ФАЗА 9: Fake site
+# ФАЗА 10: Fake site
 # =============================================================================
-phase9_fakesite() {
-    title "Фаза 9 / Fake site"
+phase10_fakesite() {
+    title "Фаза 10 / Fake site"
+
     bash <(wget -qO- \
         https://raw.githubusercontent.com/mozaroc/x-ui-pro/refs/heads/master/randomfakehtml.sh \
     ) || warn "randomfakehtml.sh вернул ошибку (не критично)"
+
     ok "Fake site установлен"
 }
 
 # =============================================================================
-# ФАЗА 10: UFW
+# ФАЗА 11: UFW
 # =============================================================================
-phase10_ufw() {
-    title "Фаза 10 / UFW"
+phase11_ufw() {
+    title "Фаза 11 / UFW"
 
     ufw --force reset
     ufw default deny incoming
@@ -469,9 +483,9 @@ phase10_ufw() {
 }
 
 # =============================================================================
-# ФАЗА 11: Итоговый вывод
+# ФАЗА 12: Итоговый вывод
 # =============================================================================
-phase11_summary() {
+phase12_summary() {
     echo ""
     echo -e "${G}╔═══════════════════════════════════════════════════════════════╗${NC}"
     echo -e "${G}║                  Развёртывание завершено!                    ║${NC}"
@@ -481,20 +495,22 @@ phase11_summary() {
     printf "  %-26s %s\n" "Connection domain:"  "$CONNECTION_DOMAIN"
     printf "  %-26s %s\n" "SNI domain:"         "$SNI_DOMAIN"
     printf "  %-26s %s\n" "Node port:"          "$NODE_PORT"
-    if [[ "$SSH_PORT" != "22" ]]; then
-        printf "  %-26s ${Y}%s  ← НОВЫЙ SSH-ПОРТ, запомни!${NC}\n" "SSH port:" "$SSH_PORT"
-    fi
+    [[ "$SSH_PORT" != "22" ]] && \
+        printf "  %-26s ${Y}%s  ← НОВЫЙ SSH-ПОРТ!${NC}\n" "SSH port:" "$SSH_PORT"
     echo ""
     echo -e "${B}  Что сделать в панели Remnawave:${NC}"
-    echo "  1. Nodes → найди ноду → статус должен быть Online"
-    echo "     Если не Online: docker compose -C $NODE_DIR logs -f"
-    echo "  2. Включи «Host visibility» (чтобы нода попала в подписки)"
-    echo "  3. Привяжи нужный Config Profile к ноде"
+    echo "  1. Nodes → убедись что нода Online"
+    echo "     Если нет: docker compose -C $NODE_DIR logs -f"
+    echo "  2. Включи Host visibility (чтобы нода попала в подписки)"
+    echo "  3. Привяжи Config Profile к ноде"
     echo ""
     echo -e "${B}  Полезные команды:${NC}"
-    echo "  docker compose -C $NODE_DIR logs -f        # логи ноды"
-    echo "  docker compose -C $NODE_DIR restart        # перезапуск"
-    echo "  /usr/local/bin/update-geo-dat.sh           # обновить dat вручную"
+    echo "  docker compose -C $NODE_DIR logs -f       # логи ноды"
+    echo "  docker compose -C $NODE_DIR restart       # перезапуск"
+    echo "  /usr/local/bin/update-geo-dat.sh          # обновить dat вручную"
+    echo "  cat /var/log/remnanode/geo-update.log     # лог обновлений"
+    echo ""
+    echo -e "${B}  Автообновление dat:${NC} каждую ночь в 03:00"
     echo ""
 }
 
@@ -504,24 +520,26 @@ phase11_summary() {
 main() {
     clear
     echo -e "${C}"
-    echo "  ┌─────────────────────────────────────────────────┐"
-    echo "  │       remnawave-node  •  deploy script v1.0     │"
-    echo "  │       Ubuntu 24.04   •  Xray  •  nginx  •  ufw  │"
-    echo "  └─────────────────────────────────────────────────┘"
+    echo "  ┌─────────────────────────────────────────────────────┐"
+    echo "  │        remnawave-node  •  deploy script  v1.1       │"
+    echo "  │        Ubuntu 24.04  •  Xray  •  nginx  •  ufw      │"
+    echo "  │        github.com/anfixit/routerus                  │"
+    echo "  └─────────────────────────────────────────────────────┘"
     echo -e "${NC}"
 
     phase0_checks
     phase1_input
     phase2_deps
-    phase3_ssh
-    phase4_ssl
-    phase5_nginx
-    phase6_node
-    phase7_geo
-    phase8_node_exporter
-    phase9_fakesite
-    phase10_ufw
-    phase11_summary
+    phase3_docker
+    phase4_ssh
+    phase5_ssl
+    phase6_nginx
+    phase7_node
+    phase8_geo
+    phase9_node_exporter
+    phase10_fakesite
+    phase11_ufw
+    phase12_summary
 }
 
 main "$@"
