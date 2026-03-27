@@ -1,4 +1,4 @@
-# routerus 🦆
+# routerus
 
 > Автоматическое развёртывание ноды [Remnawave](https://remna.st) на Ubuntu 24.04
 
@@ -284,10 +284,9 @@ routerus/
 ## Credits
 
 - [Remnawave](https://github.com/remnawave) — панель и нода
-- [runetfreedom/russia-v2ray-rules-dat](https://github.com/runetfreedom/russia-v2ray-rules-dat) — geosite/geoip для нод
+- [runetfreedom/russia-v2ray-rules-dat](https://github.com/runetfreedom/russia-v2ray-rules-dat) — geosite/geoip на нодах (серверная блокировка)
 - [hydraponique/roscomvpn-geosite](https://github.com/hydraponique/roscomvpn-geosite) — geosite для Happ клиента
-- [hydraponique/roscomvpn-routing](https://github.com/hydraponique/roscomvpn-routing) — Happ routing
-- [lifeindarkside/Remnawave-Routing-update](https://github.com/lifeindarkside/Remnawave-Routing-update) — автообновление Happ routing в панели
+- [hydraponique/roscomvpn-geoip](https://github.com/hydraponique/roscomvpn-geoip) — geoip для Happ клиента
 - [mozaroc/x-ui-pro](https://github.com/mozaroc/x-ui-pro) — randomfakehtml.sh
 - [Prometheus Node Exporter](https://github.com/prometheus/node_exporter)
 

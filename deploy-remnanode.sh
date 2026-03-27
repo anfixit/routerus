@@ -158,7 +158,8 @@ phase2_deps() {
     apt-get update -qq
     apt-get upgrade -y -qq
     apt-get install -y -qq \
-        curl wget ufw nginx certbot \
+        curl wget ufw nginx-full certbot \
+        libnginx-mod-stream \
         ca-certificates gnupg lsb-release
 
     ok "Зависимости установлены"
@@ -239,10 +240,15 @@ phase6_nginx() {
 
     mkdir -p /etc/nginx/stream-enabled
 
-    # Stream module
-    grep -qF "load_module modules/ngx_stream_module.so;" /etc/nginx/nginx.conf \
-        || sed -i '1s|^|load_module /usr/lib/nginx/modules/ngx_stream_module.so;\n|' \
-               /etc/nginx/nginx.conf
+    # Stream module — подключаем только если не подключён через modules-enabled
+    if [[ ! -f /etc/nginx/modules-enabled/50-mod-stream.conf ]]; then
+        grep -qF "load_module modules/ngx_stream_module.so;" /etc/nginx/nginx.conf \
+            || sed -i '1s|^|load_module /usr/lib/nginx/modules/ngx_stream_module.so;\n|' \
+                   /etc/nginx/nginx.conf
+    else
+        # Убираем ручную строку если она вдруг попала туда раньше
+        sed -i '/load_module.*ngx_stream_module/d' /etc/nginx/nginx.conf
+    fi
 
     grep -qF "stream { include /etc/nginx/stream-enabled/*.conf; }" /etc/nginx/nginx.conf \
         || echo "stream { include /etc/nginx/stream-enabled/*.conf; }" \
@@ -571,7 +577,7 @@ main() {
     clear
     echo -e "${C}"
     echo "  ┌─────────────────────────────────────────────────────┐"
-    echo "  │        remnawave-node  •  deploy script  v1.2       │"
+    echo "  │        remnawave-node  •  deploy script  v1.3       │"
     echo "  │        Ubuntu 24.04  •  Xray  •  nginx  •  ufw      │"
     echo "  │        github.com/anfixit/routerus                  │"
     echo "  └─────────────────────────────────────────────────────┘"
