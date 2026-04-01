@@ -1,35 +1,20 @@
 #!/usr/bin/env bash
 # =============================================================================
-# deploy-remnanode.sh v1.5 — Развёртывание remnawave-node на Ubuntu 24.04
+# deploy-remnanode.sh v1.6 — Развёртывание remnawave-node на Ubuntu 24.04
 # github.com/anfixit/routerus
 #
 # Запуск:
 #   bash <(wget -qO- https://raw.githubusercontent.com/anfixit/routerus/main/deploy-remnanode.sh)
 #
-# Flow v1.5:
-#   0  Проверки (root, Ubuntu 24)
-#   1  Интерактивный ввод (домены, порты, имя профиля)
-#   2  Зависимости (apt, nginx-full, certbot)
-#   3  Docker
-#   4  SSH-порт (опционально)
-#   5  SSL-сертификаты (certbot standalone)
-#   6  nginx (stream SNI: 443 → 8443/7443/9443)
-#   7  Генерация x25519 ключей → JSON для Config Profile → пауза
-#   8  SECRET_KEY (пользователь создаёт ноду в панели)
-#   9  geosite + geoip (ДО запуска контейнера)
-#  10  remnawave-node (docker compose)
-#  11  Автообновление geo (cron)
-#  12  Node Exporter
-#  13  Fake site
-#  14  UFW
-#  15  Итог + чеклист в панели
-#
-# Changelog v1.5:
-#   - fix: crontab на пустом crontab не ломает скрипт (pipefail)
-#   - fix: docker logs команда в summary (не docker compose -C)
-#   - add: Internal Squads в пост-деплой чеклист
-#   - add: подробные объяснения к каждому интерактивному шагу
-#   - add: UFW разрешает SSH сразу после смены порта (страховка от обрыва)
+# Changelog v1.6:
+#   - fix: SSH restart — sshd || ssh (совместимость с Ubuntu 24.04)
+#   - fix: UFW — добавлен NODE_PORT (2222) для связи панели с нодой
+#   - fix: crontab pipefail-safe (не падает на пустом crontab)
+#   - fix: wget geo-файлов с --timeout и --tries
+#   - fix: docker pull без -q (некоторые версии не поддерживают)
+#   - add: проверка Master IP != Server IP
+#   - add: подробные объяснения к каждой фазе
+#   - add: чеклист из 5 шагов в финале (включая Internal Squads)
 # =============================================================================
 
 set -euo pipefail
@@ -51,11 +36,10 @@ GEO_IP_URL="https://raw.githubusercontent.com/runetfreedom/russia-v2ray-rules-da
 NODE_EXPORTER_VER="1.9.1" XRAY_PRIVATE_KEY="" XRAY_PUBLIC_KEY=""
 
 # =============================================================================
-# ФАЗА 0: Проверки
+# ФАЗА 0
 # =============================================================================
 phase0_checks() {
     title "Фаза 0 / Проверки"
-    echo ""
     echo "  Проверяем что скрипт запущен от root на Ubuntu 24.04."
     echo ""
     [[ $EUID -eq 0 ]] || die "Запускай от root: sudo su -"
@@ -66,7 +50,7 @@ phase0_checks() {
 }
 
 # =============================================================================
-# ФАЗА 1: Интерактивный ввод
+# ФАЗА 1
 # =============================================================================
 phase1_input() {
     title "Фаза 1 / Параметры"
@@ -139,7 +123,6 @@ phase1_input() {
     echo "  только с мастер-сервера. Это НЕ IP текущего сервера."
     read -rp "  IP мастер-сервера [${MASTER_IP}]: " _m; [[ -n "$_m" ]] && MASTER_IP="$_m"
 
-    # Проверка: Master IP != Server IP
     if [[ "$MASTER_IP" == "$SERVER_IP" ]]; then
         warn "Master IP совпадает с IP этого сервера ($SERVER_IP)."
         warn "Master IP — это IP сервера с панелью Remnawave, не текущего."
@@ -162,7 +145,7 @@ phase1_input() {
 }
 
 # =============================================================================
-# ФАЗА 2: Зависимости
+# ФАЗА 2
 # =============================================================================
 phase2_deps() {
     title "Фаза 2 / Зависимости"
@@ -176,7 +159,7 @@ phase2_deps() {
 }
 
 # =============================================================================
-# ФАЗА 3: Docker
+# ФАЗА 3
 # =============================================================================
 phase3_docker() {
     title "Фаза 3 / Docker"
@@ -195,7 +178,7 @@ phase3_docker() {
 }
 
 # =============================================================================
-# ФАЗА 4: SSH-порт
+# ФАЗА 4 — FIX v1.6: sshd || ssh
 # =============================================================================
 phase4_ssh() {
     title "Фаза 4 / SSH"
@@ -207,16 +190,18 @@ phase4_ssh() {
     sed -i "s/^#*Port .*/Port ${SSH_PORT}/" /etc/ssh/sshd_config
     grep -q "^Port ${SSH_PORT}" /etc/ssh/sshd_config || echo "Port ${SSH_PORT}" >> /etc/ssh/sshd_config
 
-    # Разрешаем новый порт ДО перезапуска SSH — страховка от потери доступа
+    # Разрешаем новый порт ДО перезапуска — страховка от потери доступа
     ufw allow "${SSH_PORT}/tcp" comment "SSH" 2>/dev/null || true
 
-    systemctl restart sshd
+    # FIX v1.6: на Ubuntu 24.04 сервис может называться ssh или sshd
+    systemctl restart sshd 2>/dev/null || systemctl restart ssh 2>/dev/null || warn "Не удалось перезапустить SSH"
+
     ok "SSH → порт $SSH_PORT"
     warn "Новое подключение: ssh root@${SERVER_IP} -p ${SSH_PORT}"
 }
 
 # =============================================================================
-# ФАЗА 5: SSL
+# ФАЗА 5
 # =============================================================================
 phase5_ssl() {
     title "Фаза 5 / SSL"
@@ -236,7 +221,7 @@ phase5_ssl() {
 }
 
 # =============================================================================
-# ФАЗА 6: nginx
+# ФАЗА 6
 # =============================================================================
 phase6_nginx() {
     title "Фаза 6 / nginx"
@@ -244,7 +229,7 @@ phase6_nginx() {
     echo "  куда направить трафик:"
     echo "    SNI domain  → 8443 (Xray Reality)"
     echo "    Conn domain → 7443 (HTTPS, fake site)"
-    echo "    Reality fallback → 9443 (если клиент не Xray)"
+    echo "    Reality fallback → 9443"
     echo ""
 
     mkdir -p /etc/nginx/stream-enabled
@@ -301,7 +286,7 @@ EOF
 }
 
 # =============================================================================
-# ФАЗА 7: Генерация Reality ключей + JSON для Config Profile
+# ФАЗА 7
 # =============================================================================
 phase7_keygen() {
     title "Фаза 7 / Генерация Reality ключей"
@@ -311,7 +296,7 @@ phase7_keygen() {
     echo ""
 
     info "Загружаю образ remnawave/node..."
-    docker pull remnawave/node:latest -q 2>/dev/null || docker pull remnawave/node:latest
+    docker pull remnawave/node:latest 2>/dev/null || docker pull remnawave/node:latest
     info "Генерирую x25519..."
     local output
     output=$(docker run --rm remnawave/node:latest xray x25519 2>/dev/null) || die "xray x25519 не сработал"
@@ -401,7 +386,7 @@ ENDJSON
 }
 
 # =============================================================================
-# ФАЗА 8: SECRET_KEY
+# ФАЗА 8
 # =============================================================================
 phase8_secret() {
     title "Фаза 8 / SECRET_KEY"
@@ -428,7 +413,7 @@ phase8_secret() {
 }
 
 # =============================================================================
-# ФАЗА 9: Geo-файлы (ДО запуска контейнера!)
+# ФАЗА 9 — geo ДО контейнера + timeout/tries
 # =============================================================================
 phase9_geo() {
     title "Фаза 9 / Geo-файлы"
@@ -436,17 +421,20 @@ phase9_geo() {
     echo "  Содержат категории доменов и IP для маршрутизации и блокировки рекламы."
     echo "  Монтируются в контейнер. Скачиваем ДО запуска — иначе Docker"
     echo "  создаст пустые директории вместо файлов."
+    echo "  Файлы большие (~80MB суммарно), может занять несколько минут."
     echo ""
     mkdir -p "$GEO_DIR"
-    info "geosite.dat..."
-    wget -q -O "${GEO_DIR}/geosite.dat" "$GEO_SITE_URL" || die "Не скачался geosite.dat"
-    info "geoip.dat..."
-    wget -q -O "${GEO_DIR}/geoip.dat" "$GEO_IP_URL" || die "Не скачался geoip.dat"
+    info "geosite.dat (~62MB)..."
+    wget --timeout=120 --tries=3 -q -O "${GEO_DIR}/geosite.dat" "$GEO_SITE_URL" \
+        || die "Не скачался geosite.dat. Попробуй вручную: wget -O ${GEO_DIR}/geosite.dat $GEO_SITE_URL"
+    info "geoip.dat (~21MB)..."
+    wget --timeout=120 --tries=3 -q -O "${GEO_DIR}/geoip.dat" "$GEO_IP_URL" \
+        || die "Не скачался geoip.dat. Попробуй вручную: wget -O ${GEO_DIR}/geoip.dat $GEO_IP_URL"
     ok "geosite $(du -sh "${GEO_DIR}/geosite.dat" | cut -f1) + geoip $(du -sh "${GEO_DIR}/geoip.dat" | cut -f1)"
 }
 
 # =============================================================================
-# ФАЗА 10: remnawave-node
+# ФАЗА 10
 # =============================================================================
 phase10_node() {
     title "Фаза 10 / remnawave-node"
@@ -486,7 +474,7 @@ EOF
 }
 
 # =============================================================================
-# ФАЗА 11: Автообновление geo (cron) — FIX: pipefail-safe
+# ФАЗА 11 — crontab pipefail-safe
 # =============================================================================
 phase11_geocron() {
     title "Фаза 11 / Автообновление geo"
@@ -500,26 +488,25 @@ GEO="/opt/remnanode/geodata"
 LOG="/var/log/remnanode/geo-update.log"
 S="https://raw.githubusercontent.com/runetfreedom/russia-v2ray-rules-dat/release/geosite.dat"
 I="https://raw.githubusercontent.com/runetfreedom/russia-v2ray-rules-dat/release/geoip.dat"
-wget -q -O "${GEO}/geosite.dat.new" "$S" && mv "${GEO}/geosite.dat.new" "${GEO}/geosite.dat"
-wget -q -O "${GEO}/geoip.dat.new" "$I" && mv "${GEO}/geoip.dat.new" "${GEO}/geoip.dat"
+wget --timeout=120 --tries=3 -q -O "${GEO}/geosite.dat.new" "$S" && mv "${GEO}/geosite.dat.new" "${GEO}/geosite.dat"
+wget --timeout=120 --tries=3 -q -O "${GEO}/geoip.dat.new" "$I" && mv "${GEO}/geoip.dat.new" "${GEO}/geoip.dat"
 cd /opt/remnanode && docker compose restart remnanode
 echo "$(date '+%Y-%m-%d %H:%M:%S') updated" >> "$LOG"
 GEOEOF
     chmod +x /usr/local/bin/update-geo-dat.sh
 
-    # FIX v1.5: pipefail-safe — crontab -l может вернуть ошибку на пустом crontab
+    # FIX v1.6: pipefail-safe crontab
     local existing_cron=""
     existing_cron=$(crontab -l 2>/dev/null || true)
     local new_cron
     new_cron=$(echo "$existing_cron" | grep -v "update-geo-dat" || true)
-    echo "${new_cron}
-0 3 * * * /usr/local/bin/update-geo-dat.sh" | sed '/^$/d' | crontab -
+    printf '%s\n' "${new_cron}" "0 3 * * * /usr/local/bin/update-geo-dat.sh" | sed '/^$/d' | crontab -
 
     ok "Cron: geo обновление каждую ночь в 03:00"
 }
 
 # =============================================================================
-# ФАЗА 12: Node Exporter
+# ФАЗА 12
 # =============================================================================
 phase12_node_exporter() {
     title "Фаза 12 / Node Exporter"
@@ -551,7 +538,7 @@ EOF
 }
 
 # =============================================================================
-# ФАЗА 13: Fake site
+# ФАЗА 13
 # =============================================================================
 phase13_fakesite() {
     title "Фаза 13 / Fake site"
@@ -568,12 +555,13 @@ phase13_fakesite() {
 }
 
 # =============================================================================
-# ФАЗА 14: UFW
+# ФАЗА 14 — FIX v1.6: добавлен NODE_PORT
 # =============================================================================
 phase14_ufw() {
     title "Фаза 14 / UFW"
     echo "  Файрвол разрешает только необходимые порты:"
     echo "    SSH(${SSH_PORT}), HTTP(80), HTTPS/Xray(443),"
+    echo "    Node API(${NODE_PORT}) — для связи панели с нодой,"
     echo "    Node Exporter(9100) — только с ${MASTER_IP}"
     echo ""
     ufw --force reset
@@ -581,18 +569,19 @@ phase14_ufw() {
     ufw allow "${SSH_PORT}/tcp" comment "SSH"
     ufw allow 80/tcp comment "HTTP"
     ufw allow 443/tcp comment "HTTPS/Xray"
+    ufw allow "${NODE_PORT}/tcp" comment "remnawave-node API"
     ufw allow from "${MASTER_IP}" to any port 9100 proto tcp comment "Node Exporter"
     ufw --force enable
-    ok "UFW активирован"
+    ok "UFW: SSH(${SSH_PORT}), 80, 443, ${NODE_PORT}, 9100(${MASTER_IP})"
 }
 
 # =============================================================================
-# ФАЗА 15: Итог + чеклист
+# ФАЗА 15
 # =============================================================================
 phase15_summary() {
     echo ""
     echo -e "${G}╔════════════════════════════════════════════════════════════════╗${NC}"
-    echo -e "${G}║           remnawave-node v1.5 — развёрнут!                    ║${NC}"
+    echo -e "${G}║           remnawave-node v1.6 — развёрнут!                    ║${NC}"
     echo -e "${G}╚════════════════════════════════════════════════════════════════╝${NC}"
     echo ""
     printf "  %-22s ${C}%s${NC}\n" "Server IP:" "$SERVER_IP"
@@ -617,7 +606,7 @@ phase15_summary() {
     echo "  3. ${B}Hosts${NC} → создай хост для ноды:"
     echo "     • Инбаунд: ${PROFILE_NAME}"
     echo "     • Адрес: ${CONNECTION_DOMAIN}"
-    echo "     • Port: 443"
+    echo "     • Port: ${Y}443${NC} (не 8443!)"
     echo "     • SNI: ${SNI_DOMAIN}"
     echo ""
     echo "  4. ${B}Internal Squads${NC} → Default-Squad → добавь инбаунд ${PROFILE_NAME}"
@@ -626,9 +615,9 @@ phase15_summary() {
     echo "  5. ${B}На клиенте${NC} (Happ/v2rayNG) → обнови подписку вручную"
     echo ""
     echo -e "${B}  Команды:${NC}"
-    echo "  docker logs remnanode --tail=20        # логи"
+    echo "  docker logs remnanode --tail=20             # логи"
     echo "  cd /opt/remnanode && docker compose restart  # перезапуск"
-    echo "  /usr/local/bin/update-geo-dat.sh       # обновить geo"
+    echo "  /usr/local/bin/update-geo-dat.sh            # обновить geo"
     echo ""
 }
 
@@ -637,7 +626,7 @@ main() {
     clear
     echo -e "${C}"
     echo "  ┌──────────────────────────────────────────────────────┐"
-    echo "  │        remnawave-node  •  deploy script  v1.5       │"
+    echo "  │        remnawave-node  •  deploy script  v1.6       │"
     echo "  │        github.com/anfixit/routerus                  │"
     echo "  └──────────────────────────────────────────────────────┘"
     echo -e "${NC}"
