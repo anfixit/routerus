@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # =============================================================================
-# deploy-remnanode.sh v2.0
+# deploy-remnanode.sh v2.1
 # Разворачивает remnawave-node на чистом Ubuntu 24.04 с полным hardening
 #
 # Использование:
@@ -226,9 +226,12 @@ phase4_admin_user() {
     if id "$ADMIN_USER" &>/dev/null; then
         ok "Пользователь $ADMIN_USER уже существует"
     else
-        useradd -m -s /bin/bash -G sudo "$ADMIN_USER"
+        useradd -m -s /bin/bash "$ADMIN_USER" 2>/dev/null || true
         ok "Создан пользователь $ADMIN_USER"
     fi
+
+    # Добавляем в нужные группы (отдельно, чтобы не конфликтовать с существующими)
+    usermod -aG sudo "$ADMIN_USER" 2>/dev/null || true
 
     # Sudo без пароля (для удобства администрирования)
     echo "${ADMIN_USER} ALL=(ALL) NOPASSWD:ALL" > "/etc/sudoers.d/${ADMIN_USER}"
@@ -304,6 +307,10 @@ SSHEOF
 
     # Разрешаем новый порт в UFW ДО перезапуска SSH (страховка)
     ufw allow "${SSH_PORT}/tcp" comment "SSH" 2>/dev/null || true
+
+    # Отключаем ssh.socket (Ubuntu 24.04 — конфликтует с ssh.service)
+    systemctl disable --now ssh.socket 2>/dev/null || true
+    rm -f /etc/systemd/system/ssh.service.requires/ssh.socket 2>/dev/null || true
 
     # Перезапуск SSH
     systemctl restart sshd 2>/dev/null || systemctl restart ssh
@@ -568,12 +575,14 @@ phase10_keygen() {
 
     # Нужен Docker для генерации ключей через Xray
     local keys
-    keys=$(docker run --rm ghcr.io/xtls/xray-core:latest xray x25519 2>/dev/null) \
+    # Пробуем оба варианта: новый (x25519) и старый (xray x25519)
+    keys=$(docker run --rm ghcr.io/xtls/xray-core:latest x25519 2>/dev/null) \
+        || keys=$(docker run --rm ghcr.io/xtls/xray-core:latest xray x25519 2>/dev/null) \
         || die "Не удалось сгенерировать ключи"
 
     local PRIVATE_KEY PUBLIC_KEY
-    PRIVATE_KEY=$(echo "$keys" | grep "Private" | awk '{print $NF}')
-    PUBLIC_KEY=$(echo "$keys" | grep "Public" | awk '{print $NF}')
+    PRIVATE_KEY=$(echo "$keys" | grep -i "private" | awk '{print $NF}')
+    PUBLIC_KEY=$(echo "$keys" | grep -i "public" | awk '{print $NF}')
 
     [[ -n "$PRIVATE_KEY" && -n "$PUBLIC_KEY" ]] || die "Ключи пустые"
 
@@ -957,7 +966,7 @@ phase20_summary() {
     title "Готово!"
     echo ""
     echo -e "  ${G}╔══════════════════════════════════════════════════════════════╗${NC}"
-    echo -e "  ${G}║${NC}  ${B}remnawave-node v2.0 — деплой завершён${NC}"
+    echo -e "  ${G}║${NC}  ${B}remnawave-node v2.1 — деплой завершён${NC}"
     echo -e "  ${G}╠══════════════════════════════════════════════════════════════╣${NC}"
     echo -e "  ${G}║${NC}  Сервер:       ${SERVER_IP}"
     echo -e "  ${G}║${NC}  Connection:   ${CONNECTION_DOMAIN}"
@@ -967,6 +976,7 @@ phase20_summary() {
     echo -e "  ${G}║${NC}  ${B}SSH доступ:${NC}"
     echo -e "  ${G}║${NC}  ssh ${ADMIN_USER}@${SERVER_IP} -p ${SSH_PORT}"
     echo -e "  ${G}║${NC}  Пользователь: ${ADMIN_USER} (sudo, docker)"
+    echo -e "  ${G}║${NC}  Для root: ${Y}sudo su -${NC}"
     echo -e "  ${G}║${NC}  Root-логин: ОТКЛЮЧЁН"
     echo -e "  ${G}║${NC}  Пароли: ОТКЛЮЧЕНЫ (только SSH-ключ)"
     echo -e "  ${G}╠══════════════════════════════════════════════════════════════╣${NC}"
@@ -1005,7 +1015,7 @@ main() {
     clear
     echo -e "${C}"
     echo "  ┌──────────────────────────────────────────────────────┐"
-    echo "  │      remnawave-node  •  deploy script  v2.0         │"
+    echo "  │      remnawave-node  •  deploy script  v2.1         │"
     echo "  │      github.com/anfixit/routerus                    │"
     echo "  │                                                      │"
     echo "  │      Hardened: admin user, SSH key-only,            │"
