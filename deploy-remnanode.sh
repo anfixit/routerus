@@ -1,172 +1,208 @@
 #!/usr/bin/env bash
 # =============================================================================
-# deploy-remnanode.sh v1.6 — Развёртывание remnawave-node на Ubuntu 24.04
-# github.com/anfixit/routerus
+# deploy-remnanode.sh v2.0
+# Разворачивает remnawave-node на чистом Ubuntu 24.04 с полным hardening
 #
-# Запуск:
+# Использование:
 #   bash <(wget -qO- https://raw.githubusercontent.com/anfixit/routerus/main/deploy-remnanode.sh)
 #
-# Changelog v1.6:
-#   - fix: SSH restart — sshd || ssh (совместимость с Ubuntu 24.04)
-#   - fix: UFW — добавлен NODE_PORT (2222) для связи панели с нодой
-#   - fix: crontab pipefail-safe (не падает на пустом crontab)
-#   - fix: wget geo-файлов с --timeout и --tries
-#   - fix: docker pull без -q (некоторые версии не поддерживают)
-#   - add: проверка Master IP != Server IP
-#   - add: подробные объяснения к каждой фазе
-#   - add: чеклист из 5 шагов в финале (включая Internal Squads)
+# Фазы:
+#    0  Проверки (root, Ubuntu 24)
+#    1  Интерактивный ввод параметров
+#    2  Системные зависимости
+#    3  Docker
+#    4  Создание пользователя admin + SSH-ключ
+#    5  SSH hardening (порт 2810, key-only, no root login)
+#    6  fail2ban
+#    7  Kernel tuning (sysctl)
+#    8  SSL-сертификаты (certbot)
+#    9  nginx (stream SNI routing)
+#   10  x25519 keygen + Config Profile JSON
+#   11  remnawave-node (docker compose)
+#   12  Geo-файлы + cron-автообновление
+#   13  Node Exporter (Prometheus)
+#   14  Фейковый сайт
+#   15  Certbot auto-renew timer
+#   16  Unattended upgrades
+#   17  Watchdog-скрипт
+#   18  Автоочистка (cron docker prune + logrotate)
+#   19  UFW (финальные правила)
+#   20  Итоговый вывод
+#
+# GitHub: github.com/anfixit/routerus
 # =============================================================================
 
 set -euo pipefail
 IFS=$'\n\t'
 
-R='\033[0;31m' G='\033[0;32m' Y='\033[1;33m' C='\033[0;36m' B='\033[1m' NC='\033[0m'
+# ── Цвета ─────────────────────────────────────────────────────────────────────
+R='\033[0;31m'; G='\033[0;32m'; Y='\033[1;33m'; C='\033[0;36m'; B='\033[1m'; NC='\033[0m'
 
-ok()    { echo -e "${G}  ✓${NC} $*"; }
-info()  { echo -e "${C}  →${NC} $*"; }
-warn()  { echo -e "${Y}  !${NC} $*"; }
-die()   { echo -e "${R}  ✗ ОШИБКА:${NC} $*" >&2; exit 1; }
+ok()    { echo -e "  ${G}✓${NC} $*"; }
+info()  { echo -e "  ${C}→${NC} $*"; }
+warn()  { echo -e "  ${Y}!${NC} $*"; }
+die()   { echo -e "  ${R}✗ ОШИБКА:${NC} $*" >&2; exit 1; }
 title() { echo -e "\n${B}══ $* ══${NC}"; }
 
-SECRET_KEY="" CONNECTION_DOMAIN="" SNI_DOMAIN="" PROFILE_NAME=""
-NODE_PORT="2222" SSH_PORT="22" MASTER_IP="151.244.72.28" SERVER_IP=""
-NODE_DIR="/opt/remnanode" GEO_DIR="${NODE_DIR}/geodata"
-GEO_SITE_URL="https://raw.githubusercontent.com/runetfreedom/russia-v2ray-rules-dat/release/geosite.dat"
-GEO_IP_URL="https://raw.githubusercontent.com/runetfreedom/russia-v2ray-rules-dat/release/geoip.dat"
-NODE_EXPORTER_VER="1.9.1" XRAY_PRIVATE_KEY="" XRAY_PUBLIC_KEY=""
+# ── Глобальные переменные ─────────────────────────────────────────────────────
+SECRET_KEY=""
+CONNECTION_DOMAIN=""
+SNI_DOMAIN=""
+NODE_PORT="2222"
+SSH_PORT="2810"
+MASTER_IP="151.244.72.28"
+NODE_DIR="/opt/remnanode"
+ADMIN_USER="admin"
+ADMIN_SSH_KEY=""
+NODE_EXPORTER_VER="1.9.1"
+SERVER_IP=""
+PROFILE_NAME=""
 
 # =============================================================================
-# ФАЗА 0
+# ФАЗА 0: Проверки
 # =============================================================================
 phase0_checks() {
     title "Фаза 0 / Проверки"
-    echo "  Проверяем что скрипт запущен от root на Ubuntu 24.04."
-    echo ""
+
     [[ $EUID -eq 0 ]] || die "Запускай от root: sudo su -"
-    local ver; ver=$(grep -oP '(?<=VERSION_ID=")[^"]+' /etc/os-release 2>/dev/null || echo "unknown")
-    [[ "$ver" != "24.04" ]] && warn "Скрипт тестировался на Ubuntu 24.04. Обнаружено: $ver"
-    SERVER_IP=$(ip route get 8.8.8.8 2>/dev/null | grep -Po 'src \K\S+' | head -1 || curl -s4 ifconfig.me | tr -d '[:space:]')
-    ok "IP сервера: $SERVER_IP"
+
+    local ver
+    ver=$(grep -oP '(?<=VERSION_ID=")[^"]+' /etc/os-release 2>/dev/null || echo "unknown")
+    [[ "$ver" == "24.04" ]] || warn "Тестировалось на Ubuntu 24.04 (у тебя: $ver)"
+
+    SERVER_IP=$(ip -4 addr show scope global | grep -oP '(?<=inet\s)\d+(\.\d+){3}' | head -1)
+    [[ -n "$SERVER_IP" ]] || die "Не могу определить IP сервера"
+    ok "Сервер: $SERVER_IP (Ubuntu $ver)"
 }
 
 # =============================================================================
-# ФАЗА 1
+# ФАЗА 1: Интерактивный ввод
 # =============================================================================
 phase1_input() {
     title "Фаза 1 / Параметры"
-
     echo ""
-    echo -e "${B}  ┌──────────────────────────────────────────────────────────────┐${NC}"
-    echo -e "${B}  │  Шаг 1: Домены                                              │${NC}"
-    echo -e "${B}  └──────────────────────────────────────────────────────────────┘${NC}"
+    echo -e "  ${B}Подготовка${NC}"
+    echo "  Перед запуском нужно:"
+    echo "  1. Создать Config Profile в панели Remnawave (временные ключи — ок)"
+    echo "  2. Создать ноду в панели → скопировать SECRET KEY"
+    echo "  3. Направить 2 домена на IP этого сервера ($SERVER_IP)"
     echo ""
-    echo "  Для работы ноды нужно 2 домена, каждый направленный на IP: $SERVER_IP"
-    echo ""
-    echo "  • CONNECTION DOMAIN — адрес, который клиенты используют для"
-    echo "    подключения к VPN. На него выпускается SSL-сертификат."
-    echo "    Пример: mynode.duckdns.org"
-    echo ""
-    echo "  • SNI DOMAIN — домен для маскировки под обычный сайт (Reality)."
-    echo "    При проверке трафика DPI видит этот домен, а не VPN."
-    echo "    На нём будет фейковый сайт. Должен отличаться от connection."
-    echo "    Пример: mynode-sni.duckdns.org"
-    echo ""
-    echo "  Бесплатные DNS-сервисы:"
-    echo -e "    ${G}★${NC} duckdns.org   — до 5 поддоменов, вход через GitHub/Google"
-    echo "    • dynu.com      — IPv6, поддержка своих доменов"
-    echo "    • afraid.org    — 5 поддоменов, 55 000+ зон"
-    echo "    • noip.com      — 3 хоста, подтверждение раз в 30 дней"
-    echo "    • Или свой домен (reg.ru, Cloudflare, ...)"
+    echo -e "  ${B}Бесплатные DNS:${NC}"
+    echo "    • duckdns.org (рекомендую) — до 5 поддоменов"
+    echo "    • dynu.com / afraid.org / noip.com"
     echo ""
 
+    # ── SECRET_KEY ────────────────────────────────────────────────────────────
+    echo -e "  ${Y}Панель → Nodes → нода → Important information → SECRET KEY${NC}"
+    while [[ -z "$SECRET_KEY" ]]; do
+        read -rp "  SECRET_KEY: " SECRET_KEY
+        [[ -z "$SECRET_KEY" ]] && warn "Не может быть пустым"
+    done
+
+    # ── Домены ────────────────────────────────────────────────────────────────
+    echo ""
+    echo "  Домен 1 — адрес подключения клиентов (напр. mynode.duckdns.org)"
     while [[ -z "$CONNECTION_DOMAIN" ]]; do
         read -rp "  Connection domain: " CONNECTION_DOMAIN
         [[ -z "$CONNECTION_DOMAIN" ]] && warn "Не может быть пустым"
     done
+
+    echo ""
+    echo "  Домен 2 — SNI для Reality маскировки (напр. mynode-sni.duckdns.org)"
     while [[ -z "$SNI_DOMAIN" ]]; do
         read -rp "  SNI domain: " SNI_DOMAIN
         [[ -z "$SNI_DOMAIN" ]] && warn "Не может быть пустым"
-        [[ "$SNI_DOMAIN" == "$CONNECTION_DOMAIN" ]] && warn "Должен отличаться от connection!" && SNI_DOMAIN=""
     done
 
+    # ── Имя профиля ───────────────────────────────────────────────────────────
     echo ""
-    echo -e "${B}  ┌──────────────────────────────────────────────────────────────┐${NC}"
-    echo -e "${B}  │  Шаг 2: Имя профиля                                         │${NC}"
-    echo -e "${B}  └──────────────────────────────────────────────────────────────┘${NC}"
+    read -rp "  Имя Config Profile в панели (напр. DE_karmikoala): " PROFILE_NAME
+    PROFILE_NAME="${PROFILE_NAME:-NODE_$(hostname)}"
+
+    # ── Порт ноды ─────────────────────────────────────────────────────────────
     echo ""
-    echo "  Уникальное имя для Config Profile и ноды в панели Remnawave."
-    echo "  Формат: СТРАНА_название. Примеры: DE_berlin, NL_amsterdam, SE_stockholm"
-    echo "  Это имя будет видно в списке серверов у клиентов."
+    read -rp "  Порт remnawave-node [${NODE_PORT}]: " _port
+    [[ -n "$_port" ]] && NODE_PORT="$_port"
+
+    # ── SSH-порт ──────────────────────────────────────────────────────────────
     echo ""
-    while [[ -z "$PROFILE_NAME" ]]; do
-        read -rp "  Имя профиля: " PROFILE_NAME
-        [[ -z "$PROFILE_NAME" ]] && warn "Не может быть пустым"
+    read -rp "  SSH-порт [${SSH_PORT}]: " _ssh
+    [[ -n "$_ssh" ]] && SSH_PORT="$_ssh"
+
+    # ── SSH-ключ администратора ───────────────────────────────────────────────
+    echo ""
+    echo -e "  ${B}SSH-ключ${NC} для пользователя '${ADMIN_USER}'"
+    echo "  После деплоя вход будет ТОЛЬКО по этому ключу (пароли отключены)."
+    echo ""
+    echo "  Как получить ключ на своём компьютере:"
+    echo -e "    ${C}cat ~/.ssh/id_ed25519.pub${NC}   (рекомендуемый)"
+    echo -e "    ${C}cat ~/.ssh/id_rsa.pub${NC}       (если нет ed25519)"
+    echo ""
+    echo "  Если ключа нет — сгенерируй:"
+    echo -e "    ${C}ssh-keygen -t ed25519 -C \"your@email.com\"${NC}"
+    echo ""
+    while [[ -z "$ADMIN_SSH_KEY" ]]; do
+        read -rp "  Вставь публичный SSH-ключ: " ADMIN_SSH_KEY
+        if [[ -z "$ADMIN_SSH_KEY" ]]; then
+            warn "Не может быть пустым"
+        elif [[ ! "$ADMIN_SSH_KEY" =~ ^ssh-(ed25519|rsa|ecdsa)|^ecdsa-sha2 ]]; then
+            warn "Не похоже на публичный ключ. Должен начинаться с ssh-ed25519, ssh-rsa, ssh-ecdsa или ecdsa-sha2"
+            ADMIN_SSH_KEY=""
+        fi
     done
+    ok "SSH-ключ принят"
 
+    # ── Master IP ─────────────────────────────────────────────────────────────
     echo ""
-    echo -e "${B}  ┌──────────────────────────────────────────────────────────────┐${NC}"
-    echo -e "${B}  │  Шаг 3: Порты и мониторинг                                  │${NC}"
-    echo -e "${B}  └──────────────────────────────────────────────────────────────┘${NC}"
-    echo ""
-    echo "  Node port — порт, на котором remnawave-node общается с панелью."
-    echo "  По умолчанию 2222. Должен совпадать с тем, что указан в панели."
-    read -rp "  Порт remnawave-node [${NODE_PORT}]: " _p; [[ -n "$_p" ]] && NODE_PORT="$_p"
+    read -rp "  IP мастер-сервера для мониторинга [${MASTER_IP}]: " _master
+    [[ -n "$_master" ]] && MASTER_IP="$_master"
 
-    echo ""
-    echo "  SSH-порт — рекомендуется сменить с 22, чтобы снизить количество"
-    echo "  брутфорс-атак. Популярные варианты: 2222, 2810, 22022."
-    read -rp "  Новый SSH-порт [Enter = оставить 22]: " _s; [[ -n "$_s" ]] && SSH_PORT="$_s"
-
-    echo ""
-    echo "  Master IP — IP сервера с панелью Remnawave + Prometheus + Grafana."
-    echo "  Нужен чтобы UFW разрешил доступ к метрикам Node Exporter (порт 9100)"
-    echo "  только с мастер-сервера. Это НЕ IP текущего сервера."
-    read -rp "  IP мастер-сервера [${MASTER_IP}]: " _m; [[ -n "$_m" ]] && MASTER_IP="$_m"
-
+    # Проверка: Master IP не должен совпадать с IP ноды
     if [[ "$MASTER_IP" == "$SERVER_IP" ]]; then
-        warn "Master IP совпадает с IP этого сервера ($SERVER_IP)."
-        warn "Master IP — это IP сервера с панелью Remnawave, не текущего."
-        read -rp "  Точно верно? [y/N]: " _mc
-        [[ "${_mc,,}" != "y" ]] && read -rp "  Введи правильный Master IP: " MASTER_IP
+        warn "Master IP = IP этого сервера! Prometheus не достучится."
+        read -rp "  Точно верно? [y/N]: " _ok
+        [[ "${_ok,,}" != "y" ]] && read -rp "  Правильный Master IP: " MASTER_IP
     fi
 
+    # ── Подтверждение ─────────────────────────────────────────────────────────
     echo ""
-    echo -e "${B}  Параметры:${NC}"
-    echo "  ──────────────────────────────────────"
+    echo -e "  ${B}Параметры:${NC}"
     printf "  %-22s %s\n" "Connection:" "$CONNECTION_DOMAIN"
     printf "  %-22s %s\n" "SNI:" "$SNI_DOMAIN"
     printf "  %-22s %s\n" "Profile:" "$PROFILE_NAME"
     printf "  %-22s %s\n" "Node port:" "$NODE_PORT"
     printf "  %-22s %s\n" "SSH port:" "$SSH_PORT"
+    printf "  %-22s %s\n" "SSH-ключ:" "${ADMIN_SSH_KEY:0:40}..."
     printf "  %-22s %s\n" "Master IP:" "$MASTER_IP"
-    echo "  ──────────────────────────────────────"
-    read -rp "  Всё верно? [Y/n]: " _c; [[ "${_c,,}" == "n" ]] && die "Отменено."
+    printf "  %-22s %s...\n" "SECRET_KEY:" "${SECRET_KEY:0:20}"
+    echo ""
+    read -rp "  Всё верно? [Y/n]: " _c
+    [[ "${_c,,}" == "n" ]] && die "Отменено. Запусти заново."
     ok "Параметры приняты"
 }
 
 # =============================================================================
-# ФАЗА 2
+# ФАЗА 2: Системные зависимости
 # =============================================================================
 phase2_deps() {
     title "Фаза 2 / Зависимости"
-    echo "  Устанавливаем системные пакеты: nginx, certbot, jq и др."
-    echo ""
     export DEBIAN_FRONTEND=noninteractive
     apt-get update -qq
     apt-get upgrade -y -qq
-    apt-get install -y -qq curl wget ufw nginx-full certbot libnginx-mod-stream ca-certificates gnupg lsb-release jq
-    ok "Пакеты установлены"
+    apt-get install -y -qq \
+        curl wget ufw nginx-full certbot libnginx-mod-stream \
+        ca-certificates gnupg lsb-release jq fail2ban \
+        unattended-upgrades apt-listchanges logrotate
+    ok "Системные пакеты установлены"
 }
 
 # =============================================================================
-# ФАЗА 3
+# ФАЗА 3: Docker
 # =============================================================================
 phase3_docker() {
     title "Фаза 3 / Docker"
-    echo "  Docker нужен для запуска контейнера remnawave-node."
-    echo ""
     if command -v docker &>/dev/null; then
-        ok "Docker: $(docker --version | grep -oP '[\d.]+' | head -1)"
+        ok "Docker уже установлен: $(docker --version | grep -oP '[\d.]+' | head -1)"
     else
         info "Устанавливаю Docker..."
         curl -fsSL https://get.docker.com | sh
@@ -175,280 +211,436 @@ phase3_docker() {
     fi
     docker compose version &>/dev/null || die "docker compose plugin не найден"
     systemctl reset-failed docker 2>/dev/null || true
+    ok "Docker готов"
 }
 
 # =============================================================================
-# ФАЗА 4 — FIX v1.6: sshd || ssh
+# ФАЗА 4: Пользователь admin
 # =============================================================================
-phase4_ssh() {
-    title "Фаза 4 / SSH"
-    if [[ "$SSH_PORT" == "22" ]]; then ok "SSH-порт оставлен 22"; return; fi
-
-    echo "  Меняем SSH-порт и сразу разрешаем его в UFW (страховка от обрыва)."
+phase4_admin_user() {
+    title "Фаза 4 / Пользователь admin"
+    echo "  Создаём пользователя '${ADMIN_USER}' с sudo и SSH-ключом."
+    echo "  Root-логин по SSH будет отключён."
     echo ""
 
-    sed -i "s/^#*Port .*/Port ${SSH_PORT}/" /etc/ssh/sshd_config
-    grep -q "^Port ${SSH_PORT}" /etc/ssh/sshd_config || echo "Port ${SSH_PORT}" >> /etc/ssh/sshd_config
+    if id "$ADMIN_USER" &>/dev/null; then
+        ok "Пользователь $ADMIN_USER уже существует"
+    else
+        useradd -m -s /bin/bash -G sudo "$ADMIN_USER"
+        ok "Создан пользователь $ADMIN_USER"
+    fi
 
-    # Разрешаем новый порт ДО перезапуска — страховка от потери доступа
+    # Sudo без пароля (для удобства администрирования)
+    echo "${ADMIN_USER} ALL=(ALL) NOPASSWD:ALL" > "/etc/sudoers.d/${ADMIN_USER}"
+    chmod 440 "/etc/sudoers.d/${ADMIN_USER}"
+
+    # SSH-ключ
+    local ssh_dir="/home/${ADMIN_USER}/.ssh"
+    mkdir -p "$ssh_dir"
+    echo "$ADMIN_SSH_KEY" > "${ssh_dir}/authorized_keys"
+    chmod 700 "$ssh_dir"
+    chmod 600 "${ssh_dir}/authorized_keys"
+    chown -R "${ADMIN_USER}:${ADMIN_USER}" "$ssh_dir"
+
+    # Добавляем admin в группу docker (для управления контейнерами без sudo)
+    usermod -aG docker "$ADMIN_USER" 2>/dev/null || true
+
+    ok "SSH-ключ установлен, sudo настроен, docker-группа добавлена"
+}
+
+# =============================================================================
+# ФАЗА 5: SSH Hardening
+# =============================================================================
+phase5_ssh_hardening() {
+    title "Фаза 5 / SSH Hardening"
+    echo "  Порт: ${SSH_PORT}, только ключи, root-логин отключён."
+    echo ""
+
+    # Бэкап оригинального конфига
+    local SSH_BACKUP="/etc/ssh/sshd_config.bak.$(date +%s)"
+    cp /etc/ssh/sshd_config "$SSH_BACKUP"
+
+    # Генерация нового конфига
+    cat > /etc/ssh/sshd_config << SSHEOF
+# ═══ SSH Hardened Config (deploy-remnanode v2.0) ═══
+
+Port ${SSH_PORT}
+
+# Аутентификация
+PermitRootLogin no
+PubkeyAuthentication yes
+AuthorizedKeysFile .ssh/authorized_keys
+PasswordAuthentication no
+PermitEmptyPasswords no
+ChallengeResponseAuthentication no
+UsePAM yes
+
+# Безопасность
+MaxAuthTries 3
+MaxSessions 3
+LoginGraceTime 30
+ClientAliveInterval 300
+ClientAliveCountMax 2
+
+# Отключаем лишнее
+X11Forwarding no
+AllowTcpForwarding no
+AllowAgentForwarding no
+PermitTunnel no
+PrintMotd no
+PrintLastLog yes
+TCPKeepAlive yes
+
+# Только admin
+AllowUsers ${ADMIN_USER}
+
+# Логирование
+SyslogFacility AUTH
+LogLevel VERBOSE
+
+# Протокол
+Protocol 2
+SSHEOF
+
+    # Разрешаем новый порт в UFW ДО перезапуска SSH (страховка)
     ufw allow "${SSH_PORT}/tcp" comment "SSH" 2>/dev/null || true
 
-    # FIX v1.6: на Ubuntu 24.04 сервис может называться ssh или sshd
-    systemctl restart sshd 2>/dev/null || systemctl restart ssh 2>/dev/null || warn "Не удалось перезапустить SSH"
+    # Перезапуск SSH
+    systemctl restart sshd 2>/dev/null || systemctl restart ssh
 
-    ok "SSH → порт $SSH_PORT"
-    warn "Новое подключение: ssh root@${SERVER_IP} -p ${SSH_PORT}"
-}
-
-# =============================================================================
-# ФАЗА 5
-# =============================================================================
-phase5_ssl() {
-    title "Фаза 5 / SSL"
-    echo "  Let's Encrypt сертификаты для обоих доменов."
-    echo "  certbot использует standalone-режим (временно слушает порт 80)."
+    ok "SSH hardened: порт ${SSH_PORT}, key-only, root отключён"
     echo ""
-    systemctl stop nginx 2>/dev/null || true
-    fuser -k 80/tcp 2>/dev/null || true; sleep 1
-    for d in "$CONNECTION_DOMAIN" "$SNI_DOMAIN"; do
-        if [[ -d "/etc/letsencrypt/live/${d}" ]]; then ok "SSL $d уже есть"; continue; fi
-        info "Получаю SSL для $d..."
-        certbot certonly --standalone --non-interactive --agree-tos --register-unsafely-without-email -d "$d" \
-            || die "SSL для $d не получен. Проверь A-запись → $SERVER_IP"
-        ok "SSL $d получен"
-    done
-    systemctl start nginx 2>/dev/null || true
-}
-
-# =============================================================================
-# ФАЗА 6
-# =============================================================================
-phase6_nginx() {
-    title "Фаза 6 / nginx"
-    echo "  nginx слушает порт 443 и по SNI (имени домена в TLS) решает"
-    echo "  куда направить трафик:"
-    echo "    SNI domain  → 8443 (Xray Reality)"
-    echo "    Conn domain → 7443 (HTTPS, fake site)"
-    echo "    Reality fallback → 9443"
+    warn "══════════════════════════════════════════════════════════════"
+    warn "  ВАЖНО! Проверь доступ в НОВОМ терминале прямо сейчас:"
+    warn "  ssh ${ADMIN_USER}@${SERVER_IP} -p ${SSH_PORT}"
+    warn "  Если не работает — текущая сессия ещё открыта, чиним."
+    warn "══════════════════════════════════════════════════════════════"
     echo ""
-
-    mkdir -p /etc/nginx/stream-enabled
-    sed -i '/load_module.*ngx_stream_module/d' /etc/nginx/nginx.conf
-    grep -qF "stream { include /etc/nginx/stream-enabled/*.conf; }" /etc/nginx/nginx.conf \
-        || echo "stream { include /etc/nginx/stream-enabled/*.conf; }" >> /etc/nginx/nginx.conf
-
-    cat > /etc/nginx/stream-enabled/stream.conf << EOF
-map \$ssl_preread_server_name \$sni_upstream {
-    hostnames;
-    ${SNI_DOMAIN}          xray_backend;
-    ${CONNECTION_DOMAIN}   https_backend;
-    default                xray_backend;
-}
-upstream xray_backend  { server 127.0.0.1:8443; }
-upstream https_backend { server 127.0.0.1:7443; }
-server {
-    listen 443; listen [::]:443;
-    proxy_pass \$sni_upstream; ssl_preread on; proxy_protocol on;
-}
-EOF
-    cat > /etc/nginx/sites-available/80.conf << EOF
-server { listen 80; server_name ${CONNECTION_DOMAIN} ${SNI_DOMAIN}; return 301 https://\$host\$request_uri; }
-EOF
-    cat > "/etc/nginx/sites-available/${CONNECTION_DOMAIN}.conf" << EOF
-server {
-    server_tokens off; server_name ${CONNECTION_DOMAIN};
-    listen 7443 ssl http2 proxy_protocol; listen [::]:7443 ssl http2 proxy_protocol;
-    ssl_certificate /etc/letsencrypt/live/${CONNECTION_DOMAIN}/fullchain.pem;
-    ssl_certificate_key /etc/letsencrypt/live/${CONNECTION_DOMAIN}/privkey.pem;
-    ssl_protocols TLSv1.2 TLSv1.3;
-    root /var/www/html/; index index.html;
-    location / { try_files \$uri \$uri/ =404; }
-}
-EOF
-    cat > "/etc/nginx/sites-available/${SNI_DOMAIN}.conf" << EOF
-server {
-    server_tokens off; server_name ${SNI_DOMAIN};
-    listen 9443 ssl http2; listen [::]:9443 ssl http2;
-    ssl_certificate /etc/letsencrypt/live/${SNI_DOMAIN}/fullchain.pem;
-    ssl_certificate_key /etc/letsencrypt/live/${SNI_DOMAIN}/privkey.pem;
-    ssl_protocols TLSv1.2 TLSv1.3;
-    root /var/www/html/; index index.html;
-    location / { try_files \$uri \$uri/ =404; }
-}
-EOF
-    rm -f /etc/nginx/sites-enabled/default
-    ln -sf /etc/nginx/sites-available/80.conf /etc/nginx/sites-enabled/
-    ln -sf "/etc/nginx/sites-available/${CONNECTION_DOMAIN}.conf" /etc/nginx/sites-enabled/
-    ln -sf "/etc/nginx/sites-available/${SNI_DOMAIN}.conf" /etc/nginx/sites-enabled/
-    nginx -t || die "nginx config test failed"
-    systemctl restart nginx
-    ok "nginx: 443→SNI, 7443→HTTPS, 9443→Reality fallback"
-}
-
-# =============================================================================
-# ФАЗА 7
-# =============================================================================
-phase7_keygen() {
-    title "Фаза 7 / Генерация Reality ключей"
-    echo "  Reality (XTLS) использует ключи x25519 для шифрования."
-    echo "  Private Key вставляется в Config Profile на сервере."
-    echo "  Public Key используется клиентами (подставляется автоматически)."
-    echo ""
-
-    info "Загружаю образ remnawave/node..."
-    docker pull remnawave/node:latest 2>/dev/null || docker pull remnawave/node:latest
-    info "Генерирую x25519..."
-    local output
-    output=$(docker run --rm remnawave/node:latest xray x25519 2>/dev/null) || die "xray x25519 не сработал"
-    XRAY_PRIVATE_KEY=$(echo "$output" | grep -i "private" | awk '{print $NF}')
-    XRAY_PUBLIC_KEY=$(echo "$output" | grep -i "public" | awk '{print $NF}')
-    [[ -z "$XRAY_PUBLIC_KEY" ]] && XRAY_PUBLIC_KEY=$(echo "$output" | grep -i "password" | awk '{print $NF}')
-    [[ -z "$XRAY_PRIVATE_KEY" ]] && die "Не удалось получить PrivateKey"
-
-    echo ""
-    echo -e "${G}  ╔═══════════════════════════════════════════════════════════╗${NC}"
-    echo -e "${G}  ║${NC}  ${B}Private Key:${NC} ${Y}${XRAY_PRIVATE_KEY}${NC}"
-    echo -e "${G}  ║${NC}  ${B}Public Key:${NC}  ${C}${XRAY_PUBLIC_KEY}${NC}"
-    echo -e "${G}  ╚═══════════════════════════════════════════════════════════╝${NC}"
-    echo ""
-    read -rp "  Config Profile '${PROFILE_NAME}' уже создан в панели? [y/N]: " _hp
-    if [[ "${_hp,,}" == "y" ]]; then
-        echo ""
-        info "Обнови в существующем профиле:"
-        echo "    privateKey  → ${XRAY_PRIVATE_KEY}"
-        echo "    serverNames → [\"${SNI_DOMAIN}\"]"
-        read -rp "  Обнови профиль, затем Enter... " _
-    else
-        echo ""
-        echo -e "${B}  Создай Config Profile в панели Remnawave.${NC}"
-        echo "  Панель → Config Profiles → + (добавить) → имя: ${PROFILE_NAME}"
-        echo "  Вставь этот JSON в поле «Конфиг. Xray»:"
-        echo ""
-        echo -e "${B}  ─── СКОПИРУЙ ОТСЮДА ───${NC}"
-        cat <<ENDJSON
-{
-  "log": {"loglevel": "warning"},
-  "dns": {
-    "servers": [
-      {"address": "https://94.140.14.14/dns-query", "domains": [], "skipFallback": false},
-      "localhost"
-    ]
-  },
-  "inbounds": [
-    {
-      "tag": "${PROFILE_NAME}",
-      "port": 8443,
-      "protocol": "vless",
-      "settings": {"clients": [], "decryption": "none"},
-      "sniffing": {"enabled": true, "destOverride": ["http", "tls", "quic"]},
-      "streamSettings": {
-        "network": "tcp",
-        "security": "reality",
-        "tcpSettings": {"acceptProxyProtocol": true},
-        "realitySettings": {
-          "dest": "127.0.0.1:9443", "show": false, "xver": 0,
-          "shortIds": ["", "a1", "bc23", "def456", "1234abcd", "ab1234567890", "abcd12345678abcd"],
-          "privateKey": "${XRAY_PRIVATE_KEY}",
-          "serverNames": ["${SNI_DOMAIN}"]
-        }
-      }
-    }
-  ],
-  "outbounds": [
-    {"tag": "DIRECT", "protocol": "freedom"},
-    {"tag": "BLOCK", "protocol": "blackhole"}
-  ],
-  "routing": {
-    "domainStrategy": "IPIfNonMatch",
-    "rules": [
-      {"type": "field", "outboundTag": "BLOCK", "network": "udp", "port": "135,137,138,139"},
-      {"type": "field", "outboundTag": "BLOCK", "domain": [
-        "geosite:category-ads-all", "geosite:win-spy",
-        "domain:google-analytics.com", "domain:analytics.yandex.ru", "domain:mc.yandex.ru",
-        "domain:appcenter.ms", "domain:app-measurement.com", "domain:firebase.io",
-        "domain:crashlytics.com", "domain:doubleclick.net", "domain:googlesyndication.com",
-        "domain:googleadservices.com", "domain:googletagmanager.com",
-        "domain:googletagservices.com", "domain:scorecardresearch.com",
-        "domain:quantserve.com", "domain:adnxs.com", "domain:moatads.com"
-      ]},
-      {"type": "field", "outboundTag": "BLOCK", "network": "udp", "port": "443"},
-      {"type": "field", "outboundTag": "DIRECT", "protocol": ["bittorrent"]},
-      {"type": "field", "outboundTag": "DIRECT", "ip": ["geoip:private"]}
-    ]
-  }
-}
-ENDJSON
-        echo -e "${B}  ─── ДО СЮДА ───${NC}"
-        echo ""
-        read -rp "  Создай профиль в панели, затем Enter... " _
+    read -rp "  Подключился в новом терминале? [Y/n]: " _check
+    if [[ "${_check,,}" == "n" ]]; then
+        warn "Откатываю SSH на порт 22 с root-доступом..."
+        cp "$SSH_BACKUP" /etc/ssh/sshd_config 2>/dev/null
+        systemctl restart sshd 2>/dev/null || systemctl restart ssh
+        die "SSH откачен. Разберись с ключами и запусти скрипт заново."
     fi
-    ok "Ключи готовы, профиль настроен"
+    ok "SSH доступ подтверждён"
 }
 
 # =============================================================================
-# ФАЗА 8
+# ФАЗА 6: fail2ban
 # =============================================================================
-phase8_secret() {
-    title "Фаза 8 / SECRET_KEY"
-    echo ""
-    echo "  Теперь создай ноду в панели Remnawave."
-    echo "  SECRET_KEY — уникальный токен, который связывает контейнер"
-    echo "  на этом сервере с нодой в панели. Генерируется панелью."
-    echo ""
-    echo -e "${B}  Шаги в панели:${NC}"
-    echo "  1. Nodes → + (добавить ноду)"
-    echo "  2. Имя: ${PROFILE_NAME}"
-    echo "  3. IP: ${SERVER_IP}"
-    echo "  4. Порт: ${NODE_PORT}"
-    echo "  5. Привяжи профиль: ${PROFILE_NAME}"
-    echo "  6. Создай ноду → скопируй SECRET_KEY (длинная строка eyJ...)"
-    echo ""
-    echo -e "  ${Y}Нода будет Offline — это нормально, мы её ещё не запустили.${NC}"
-    echo ""
-    while [[ -z "$SECRET_KEY" ]]; do
-        read -rp "  SECRET_KEY: " SECRET_KEY
-        [[ -z "$SECRET_KEY" ]] && warn "Не может быть пустым"
+phase6_fail2ban() {
+    title "Фаза 6 / fail2ban"
+
+    cat > /etc/fail2ban/jail.local << F2BEOF
+[DEFAULT]
+bantime  = 3600
+findtime = 600
+maxretry = 3
+backend  = systemd
+
+[sshd]
+enabled  = true
+port     = ${SSH_PORT}
+filter   = sshd
+logpath  = /var/log/auth.log
+maxretry = 3
+bantime  = 3600
+
+[nginx-botsearch]
+enabled  = true
+port     = http,https
+filter   = nginx-botsearch
+logpath  = /var/log/nginx/error.log
+maxretry = 5
+bantime  = 86400
+
+[nginx-limit-req]
+enabled  = true
+port     = http,https
+filter   = nginx-limit-req
+logpath  = /var/log/nginx/error.log
+maxretry = 10
+bantime  = 3600
+F2BEOF
+
+    systemctl enable --now fail2ban
+    systemctl restart fail2ban
+    ok "fail2ban: SSH (порт ${SSH_PORT}) + nginx"
+}
+
+# =============================================================================
+# ФАЗА 7: Kernel Tuning (sysctl)
+# =============================================================================
+phase7_sysctl() {
+    title "Фаза 7 / Kernel Tuning"
+
+    cat > /etc/sysctl.d/99-remnanode.conf << 'SYSEOF'
+# ═══ Remnawave Node — sysctl tuning ═══
+
+# ── TCP/Network Performance ──
+net.core.rmem_max = 16777216
+net.core.wmem_max = 16777216
+net.core.rmem_default = 1048576
+net.core.wmem_default = 1048576
+net.ipv4.tcp_rmem = 4096 1048576 16777216
+net.ipv4.tcp_wmem = 4096 1048576 16777216
+net.core.somaxconn = 65535
+net.core.netdev_max_backlog = 65535
+net.ipv4.tcp_max_syn_backlog = 65535
+net.ipv4.tcp_max_tw_buckets = 2000000
+net.ipv4.tcp_tw_reuse = 1
+net.ipv4.tcp_fin_timeout = 15
+net.ipv4.tcp_keepalive_time = 300
+net.ipv4.tcp_keepalive_intvl = 30
+net.ipv4.tcp_keepalive_probes = 5
+net.ipv4.ip_local_port_range = 10000 65535
+
+# ── TCP Fast Open ──
+net.ipv4.tcp_fastopen = 3
+
+# ── BBR Congestion Control ──
+net.core.default_qdisc = fq
+net.ipv4.tcp_congestion_control = bbr
+
+# ── Conntrack (для большого числа соединений) ──
+net.netfilter.nf_conntrack_max = 262144
+
+# ── Защита от SYN flood ──
+net.ipv4.tcp_syncookies = 1
+
+# ── Защита от IP spoofing ──
+net.ipv4.conf.all.rp_filter = 1
+net.ipv4.conf.default.rp_filter = 1
+
+# ── Отключаем ICMP redirect (не нужно для VPN-ноды) ──
+net.ipv4.conf.all.accept_redirects = 0
+net.ipv4.conf.default.accept_redirects = 0
+net.ipv4.conf.all.send_redirects = 0
+net.ipv4.conf.default.send_redirects = 0
+
+# ── Отключаем source routing ──
+net.ipv4.conf.all.accept_source_route = 0
+net.ipv4.conf.default.accept_source_route = 0
+
+# ── File descriptors ──
+fs.file-max = 1048576
+fs.nr_open = 1048576
+SYSEOF
+
+    sysctl -p /etc/sysctl.d/99-remnanode.conf >/dev/null 2>&1
+    ok "Kernel tuned: BBR, TCP buffers, conntrack, SYN flood protection"
+}
+
+# =============================================================================
+# ФАЗА 8: SSL
+# =============================================================================
+phase8_ssl() {
+    title "Фаза 8 / SSL-сертификаты"
+    systemctl stop nginx 2>/dev/null || true
+    fuser -k 80/tcp 2>/dev/null || true
+    sleep 1
+
+    for d in "$CONNECTION_DOMAIN" "$SNI_DOMAIN"; do
+        if [[ -d "/etc/letsencrypt/live/${d}" ]]; then
+            ok "SSL $d — уже есть"
+            continue
+        fi
+        info "Получаю SSL для $d..."
+        certbot certonly --standalone --non-interactive \
+            --agree-tos --register-unsafely-without-email \
+            -d "$d" \
+            || die "Не удалось получить SSL для $d. Проверь DNS: nslookup $d"
+        ok "SSL $d"
     done
-    ok "SECRET_KEY (${#SECRET_KEY} символов)"
 }
 
 # =============================================================================
-# ФАЗА 9 — geo ДО контейнера + timeout/tries
+# ФАЗА 9: nginx (stream SNI routing)
 # =============================================================================
-phase9_geo() {
-    title "Фаза 9 / Geo-файлы"
-    echo "  Скачиваем geosite.dat и geoip.dat от runetfreedom."
-    echo "  Содержат категории доменов и IP для маршрутизации и блокировки рекламы."
-    echo "  Монтируются в контейнер. Скачиваем ДО запуска — иначе Docker"
-    echo "  создаст пустые директории вместо файлов."
-    echo "  Файлы большие (~80MB суммарно), может занять несколько минут."
+phase9_nginx() {
+    title "Фаза 9 / nginx"
+    echo "  Порт 443 → SNI routing:"
+    echo "    ${CONNECTION_DOMAIN} → Xray (8443)"
+    echo "    ${SNI_DOMAIN}        → HTTPS (7443) + Reality fallback (9443)"
     echo ""
-    mkdir -p "$GEO_DIR"
-    info "geosite.dat (~62MB)..."
-    wget --timeout=120 --tries=3 -q -O "${GEO_DIR}/geosite.dat" "$GEO_SITE_URL" \
-        || die "Не скачался geosite.dat. Попробуй вручную: wget -O ${GEO_DIR}/geosite.dat $GEO_SITE_URL"
-    info "geoip.dat (~21MB)..."
-    wget --timeout=120 --tries=3 -q -O "${GEO_DIR}/geoip.dat" "$GEO_IP_URL" \
-        || die "Не скачался geoip.dat. Попробуй вручную: wget -O ${GEO_DIR}/geoip.dat $GEO_IP_URL"
-    ok "geosite $(du -sh "${GEO_DIR}/geosite.dat" | cut -f1) + geoip $(du -sh "${GEO_DIR}/geoip.dat" | cut -f1)"
+
+    # ── stream SNI ────────────────────────────────────────────────────────────
+    mkdir -p /etc/nginx/stream-enabled
+
+    cat > /etc/nginx/stream-enabled/stream.conf << STRMEOF
+map \$ssl_preread_server_name \$sni_name {
+    ${CONNECTION_DOMAIN}    xray;
+    ${SNI_DOMAIN}           reality;
+    default                 xray;
+}
+
+upstream xray {
+    server 127.0.0.1:8443;
+}
+
+upstream reality {
+    server 127.0.0.1:9443;
+}
+
+server {
+    listen 443;
+    listen [::]:443;
+    proxy_pass      \$sni_name;
+    ssl_preread     on;
+    proxy_protocol  on;
+}
+STRMEOF
+
+    # ── Добавляем stream include в nginx.conf (если нет) ──────────────────────
+    if ! grep -q "stream-enabled" /etc/nginx/nginx.conf; then
+        echo "stream { include /etc/nginx/stream-enabled/*.conf; }" >> /etc/nginx/nginx.conf
+    fi
+
+    # ── HTTPS site (порт 7443) ────────────────────────────────────────────────
+    cat > /etc/nginx/sites-available/node-https.conf << HTTPEOF
+server {
+    listen 7443 ssl proxy_protocol;
+    server_name ${CONNECTION_DOMAIN} ${SNI_DOMAIN};
+
+    ssl_certificate     /etc/letsencrypt/live/${CONNECTION_DOMAIN}/fullchain.pem;
+    ssl_certificate_key /etc/letsencrypt/live/${CONNECTION_DOMAIN}/privkey.pem;
+
+    set_real_ip_from 127.0.0.1;
+    real_ip_header proxy_protocol;
+
+    location / {
+        root /var/www/html;
+        index index.html;
+    }
+}
+HTTPEOF
+
+    # ── Reality fallback (порт 9443) ──────────────────────────────────────────
+    cat > /etc/nginx/sites-available/node-reality.conf << REALEOF
+server {
+    listen 9443 ssl proxy_protocol;
+    server_name ${SNI_DOMAIN};
+
+    ssl_certificate     /etc/letsencrypt/live/${SNI_DOMAIN}/fullchain.pem;
+    ssl_certificate_key /etc/letsencrypt/live/${SNI_DOMAIN}/privkey.pem;
+
+    set_real_ip_from 127.0.0.1;
+    real_ip_header proxy_protocol;
+
+    location / {
+        root /var/www/html;
+        index index.html;
+    }
+}
+REALEOF
+
+    # ── HTTP → HTTPS redirect (порт 80) ──────────────────────────────────────
+    cat > /etc/nginx/sites-available/redirect-80.conf << R80EOF
+server {
+    listen 80 default_server;
+    listen [::]:80 default_server;
+    location /.well-known/acme-challenge/ { root /var/www/html; }
+    location / { return 301 https://\$host\$request_uri; }
+}
+R80EOF
+
+    # Активируем конфиги
+    rm -f /etc/nginx/sites-enabled/default
+    ln -sf /etc/nginx/sites-available/node-https.conf /etc/nginx/sites-enabled/
+    ln -sf /etc/nginx/sites-available/node-reality.conf /etc/nginx/sites-enabled/
+    ln -sf /etc/nginx/sites-available/redirect-80.conf /etc/nginx/sites-enabled/
+
+    # Убираем конфликтный load_module (Ubuntu 24.04 грузит через modules-enabled)
+    sed -i '/load_module.*ngx_stream_module/d' /etc/nginx/nginx.conf
+
+    nginx -t || die "nginx конфиг невалиден"
+    systemctl enable --now nginx
+    systemctl restart nginx
+    ok "nginx: SNI routing на порту 443"
 }
 
 # =============================================================================
-# ФАЗА 10
+# ФАЗА 10: x25519 Keygen
 # =============================================================================
-phase10_node() {
-    title "Фаза 10 / remnawave-node"
-    echo "  Запускаем контейнер с Xray-core, который подключится к панели."
+phase10_keygen() {
+    title "Фаза 10 / Генерация x25519 ключей"
+
+    # Нужен Docker для генерации ключей через Xray
+    local keys
+    keys=$(docker run --rm ghcr.io/xtls/xray-core:latest xray x25519 2>/dev/null) \
+        || die "Не удалось сгенерировать ключи"
+
+    local PRIVATE_KEY PUBLIC_KEY
+    PRIVATE_KEY=$(echo "$keys" | grep "Private" | awk '{print $NF}')
+    PUBLIC_KEY=$(echo "$keys" | grep "Public" | awk '{print $NF}')
+
+    [[ -n "$PRIVATE_KEY" && -n "$PUBLIC_KEY" ]] || die "Ключи пустые"
+
     echo ""
-    mkdir -p "$NODE_DIR" /var/log/remnanode
-    cat > "${NODE_DIR}/docker-compose.yml" << EOF
+    echo -e "  ${G}╔══════════════════════════════════════════════════════════════╗${NC}"
+    echo -e "  ${G}║${NC}  ${B}x25519 ключи сгенерированы${NC}"
+    echo -e "  ${G}╠══════════════════════════════════════════════════════════════╣${NC}"
+    echo -e "  ${G}║${NC}  Private: ${Y}${PRIVATE_KEY}${NC}"
+    echo -e "  ${G}║${NC}  Public:  ${Y}${PUBLIC_KEY}${NC}"
+    echo -e "  ${G}╠══════════════════════════════════════════════════════════════╣${NC}"
+    echo -e "  ${G}║${NC}"
+    echo -e "  ${G}║${NC}  Сейчас обнови Config Profile '${PROFILE_NAME}' в панели:"
+    echo -e "  ${G}║${NC}  1. Панель → Config Profiles → ${PROFILE_NAME} → Edit"
+    echo -e "  ${G}║${NC}  2. Замени privateKey на: ${Y}${PRIVATE_KEY}${NC}"
+    echo -e "  ${G}║${NC}  3. Замени shortIds — оставь существующие или сгенерируй"
+    echo -e "  ${G}║${NC}  4. serverNames → [\"${SNI_DOMAIN}\"]"
+    echo -e "  ${G}║${NC}  5. Dest → ${SNI_DOMAIN}:9443"
+    echo -e "  ${G}║${NC}  6. Сохрани"
+    echo -e "  ${G}║${NC}"
+    echo -e "  ${G}║${NC}  ${B}Host в панели:${NC}"
+    echo -e "  ${G}║${NC}  Address: ${CONNECTION_DOMAIN}"
+    echo -e "  ${G}║${NC}  Port: 443 (НЕ 8443!)"
+    echo -e "  ${G}║${NC}  SNI: ${SNI_DOMAIN}"
+    echo -e "  ${G}╚══════════════════════════════════════════════════════════════╝${NC}"
+    echo ""
+
+    # Сохраняем ключи для docker-compose
+    echo "$PRIVATE_KEY" > "${NODE_DIR}/.private_key"
+    echo "$PUBLIC_KEY" > "${NODE_DIR}/.public_key"
+
+    read -rp "  Обновил(а) профиль в панели? Нажми Enter для продолжения..."
+    ok "Ключи сгенерированы и сохранены"
+}
+
+# =============================================================================
+# ФАЗА 11: remnawave-node (docker compose)
+# =============================================================================
+phase11_node() {
+    title "Фаза 11 / remnawave-node"
+
+    mkdir -p "${NODE_DIR}/geodata"
+
+    # Docker log rotation (глобально, до запуска контейнера)
+    mkdir -p /etc/docker
+    if [[ ! -f /etc/docker/daemon.json ]]; then
+        cat > /etc/docker/daemon.json << 'DJEOF'
+{
+    "log-driver": "json-file",
+    "log-opts": {
+        "max-size": "10m",
+        "max-file": "3"
+    }
+}
+DJEOF
+        systemctl restart docker
+        sleep 2
+        ok "Docker log rotation: ≤ 10MB × 3 файла"
+    fi
+
+    cat > "${NODE_DIR}/docker-compose.yml" << DCEOF
 services:
   remnanode:
     container_name: remnanode
     hostname: remnanode
     image: remnawave/node:latest
-    restart: always
     network_mode: host
+    restart: always
     cap_add:
       - NET_ADMIN
     ulimits:
@@ -459,180 +651,389 @@ services:
       - NODE_PORT=${NODE_PORT}
       - SECRET_KEY=${SECRET_KEY}
     volumes:
-      - ${GEO_DIR}/geosite.dat:/usr/local/share/xray/geosite.dat:ro
-      - ${GEO_DIR}/geoip.dat:/usr/local/share/xray/geoip.dat:ro
-      - /var/log/remnanode:/var/log/remnanode
-EOF
-    cd "$NODE_DIR"
+      - ${NODE_DIR}/geodata/geosite.dat:/usr/local/share/xray/geosite.dat:ro
+      - ${NODE_DIR}/geodata/geoip.dat:/usr/local/share/xray/geoip.dat:ro
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+DCEOF
+
+    ok "docker-compose.yml создан"
+}
+
+# =============================================================================
+# ФАЗА 12: Geo-файлы + cron
+# =============================================================================
+phase12_geo() {
+    title "Фаза 12 / Geo-файлы"
+    echo "  Источник: runetfreedom/russia-v2ray-rules-dat"
+    echo "  geosite.dat (~62MB) + geoip.dat (~5MB)"
+    echo ""
+
+    local GEO_BASE="https://raw.githubusercontent.com/runetfreedom/russia-v2ray-rules-dat/release"
+
+    info "Скачиваю geosite.dat..."
+    wget -q --timeout=120 --tries=3 -O "${NODE_DIR}/geodata/geosite.dat" \
+        "${GEO_BASE}/geosite.dat" \
+        || die "Не удалось скачать geosite.dat"
+    ok "geosite.dat ($(du -h "${NODE_DIR}/geodata/geosite.dat" | cut -f1))"
+
+    info "Скачиваю geoip.dat..."
+    wget -q --timeout=120 --tries=3 -O "${NODE_DIR}/geodata/geoip.dat" \
+        "${GEO_BASE}/geoip.dat" \
+        || die "Не удалось скачать geoip.dat"
+    ok "geoip.dat ($(du -h "${NODE_DIR}/geodata/geoip.dat" | cut -f1))"
+
+    # Теперь запускаем контейнер (geo-файлы уже на месте)
+    info "Запускаю remnawave-node..."
+    cd "${NODE_DIR}"
+    docker compose pull
     docker compose up -d
     sleep 5
-    if docker ps --format '{{.Names}}' | grep -q remnanode; then
-        ok "remnawave-node запущен (порт ${NODE_PORT})"
-    else
-        warn "Проверь логи: docker logs remnanode --tail=20"
-    fi
-}
 
-# =============================================================================
-# ФАЗА 11 — crontab pipefail-safe
-# =============================================================================
-phase11_geocron() {
-    title "Фаза 11 / Автообновление geo"
-    echo "  Geo-файлы обновляются каждые 6 часов в источнике."
-    echo "  Настраиваем cron на обновление каждую ночь в 03:00."
-    echo ""
+    if docker ps | grep -q remnanode; then
+        ok "remnanode запущен"
+    else
+        warn "Контейнер не запустился, логи:"
+        docker logs remnanode --tail=10
+        die "remnanode не стартовал"
+    fi
+
+    # ── Cron автообновление ───────────────────────────────────────────────────
+    mkdir -p /var/log/remnanode
+
     cat > /usr/local/bin/update-geo-dat.sh << 'GEOEOF'
-#!/usr/bin/env bash
+#!/bin/bash
 set -euo pipefail
-GEO="/opt/remnanode/geodata"
 LOG="/var/log/remnanode/geo-update.log"
-S="https://raw.githubusercontent.com/runetfreedom/russia-v2ray-rules-dat/release/geosite.dat"
-I="https://raw.githubusercontent.com/runetfreedom/russia-v2ray-rules-dat/release/geoip.dat"
-wget --timeout=120 --tries=3 -q -O "${GEO}/geosite.dat.new" "$S" && mv "${GEO}/geosite.dat.new" "${GEO}/geosite.dat"
-wget --timeout=120 --tries=3 -q -O "${GEO}/geoip.dat.new" "$I" && mv "${GEO}/geoip.dat.new" "${GEO}/geoip.dat"
-cd /opt/remnanode && docker compose restart remnanode
-echo "$(date '+%Y-%m-%d %H:%M:%S') updated" >> "$LOG"
+DIR="/opt/remnanode/geodata"
+BASE="https://raw.githubusercontent.com/runetfreedom/russia-v2ray-rules-dat/release"
+TS=$(date "+%Y-%m-%d %H:%M:%S")
+
+echo "[$TS] Начинаю обновление geo-файлов" >> "$LOG"
+
+for f in geosite.dat geoip.dat; do
+    wget -q --timeout=120 --tries=3 -O "${DIR}/${f}.tmp" "${BASE}/${f}" 2>>"$LOG"
+    if [[ -s "${DIR}/${f}.tmp" ]]; then
+        mv "${DIR}/${f}.tmp" "${DIR}/${f}"
+        echo "[$TS] $f обновлён ($(du -h "${DIR}/${f}" | cut -f1))" >> "$LOG"
+    else
+        rm -f "${DIR}/${f}.tmp"
+        echo "[$TS] ОШИБКА: $f пустой" >> "$LOG"
+    fi
+done
+
+cd /opt/remnanode && docker compose restart >> "$LOG" 2>&1
+echo "[$TS] Контейнер перезапущен" >> "$LOG"
 GEOEOF
+
     chmod +x /usr/local/bin/update-geo-dat.sh
 
-    # FIX v1.6: pipefail-safe crontab
-    local existing_cron=""
-    existing_cron=$(crontab -l 2>/dev/null || true)
-    local new_cron
-    new_cron=$(echo "$existing_cron" | grep -v "update-geo-dat" || true)
-    printf '%s\n' "${new_cron}" "0 3 * * * /usr/local/bin/update-geo-dat.sh" | sed '/^$/d' | crontab -
+    # Cron: ежедневно в 03:00
+    local CRON_LINE="0 3 * * * /usr/local/bin/update-geo-dat.sh"
+    local CURRENT_CRON=""
+    CURRENT_CRON=$(crontab -l 2>/dev/null || true)
+    if ! echo "$CURRENT_CRON" | grep -qF "update-geo-dat"; then
+        echo "${CURRENT_CRON:+$CURRENT_CRON
+}${CRON_LINE}" | crontab -
+    fi
 
-    ok "Cron: geo обновление каждую ночь в 03:00"
+    ok "Автообновление geo: cron 0 3 * * *"
 }
 
 # =============================================================================
-# ФАЗА 12
+# ФАЗА 13: Node Exporter
 # =============================================================================
-phase12_node_exporter() {
-    title "Фаза 12 / Node Exporter"
-    echo "  Prometheus Node Exporter собирает метрики сервера (CPU, RAM, диск)."
-    echo "  Grafana на мастер-сервере отображает их в дашборде."
-    echo "  Доступ ограничен UFW — только с IP мастера ($MASTER_IP)."
-    echo ""
-    if command -v node_exporter &>/dev/null; then ok "Уже установлен"; return; fi
-    local tb="node_exporter-${NODE_EXPORTER_VER}.linux-amd64.tar.gz"
-    wget -qO "/tmp/${tb}" "https://github.com/prometheus/node_exporter/releases/download/v${NODE_EXPORTER_VER}/${tb}"
-    tar -xzf "/tmp/${tb}" -C /tmp
+phase13_node_exporter() {
+    title "Фаза 13 / Node Exporter"
+
+    if [[ -f /usr/local/bin/node_exporter ]]; then
+        ok "Node Exporter уже установлен"
+        return
+    fi
+
+    local NE_URL="https://github.com/prometheus/node_exporter/releases/download/v${NODE_EXPORTER_VER}/node_exporter-${NODE_EXPORTER_VER}.linux-amd64.tar.gz"
+
+    wget -q --timeout=60 --tries=3 -O /tmp/ne.tar.gz "$NE_URL" \
+        || die "Не удалось скачать Node Exporter"
+    tar -xzf /tmp/ne.tar.gz -C /tmp
     mv "/tmp/node_exporter-${NODE_EXPORTER_VER}.linux-amd64/node_exporter" /usr/local/bin/
-    rm -rf "/tmp/node_exporter-${NODE_EXPORTER_VER}.linux-amd64" "/tmp/${tb}"
+    rm -rf /tmp/ne.tar.gz "/tmp/node_exporter-${NODE_EXPORTER_VER}.linux-amd64"
+
     useradd -rs /bin/false node_exporter 2>/dev/null || true
-    cat > /etc/systemd/system/node_exporter.service << EOF
+
+    cat > /etc/systemd/system/node_exporter.service << 'NEEOF'
 [Unit]
 Description=Prometheus Node Exporter
 After=network.target
+
 [Service]
 User=node_exporter
 ExecStart=/usr/local/bin/node_exporter --web.listen-address=0.0.0.0:9100
 Restart=always
 RestartSec=5
+
 [Install]
 WantedBy=multi-user.target
-EOF
-    systemctl daemon-reload; systemctl enable --now node_exporter
-    ok "Node Exporter v${NODE_EXPORTER_VER} на :9100"
+NEEOF
+
+    systemctl daemon-reload
+    systemctl enable --now node_exporter
+    ok "Node Exporter v${NODE_EXPORTER_VER} на порту 9100"
 }
 
 # =============================================================================
-# ФАЗА 13
+# ФАЗА 14: Фейковый сайт
 # =============================================================================
-phase13_fakesite() {
-    title "Фаза 13 / Fake site"
-    echo "  Фейковый сайт показывается при проверке SNI-домена браузером."
-    echo "  Если кто-то зайдёт на SNI-домен — увидит обычный сайт, не VPN."
-    echo ""
-    mkdir -p /var/www/html
-    if bash <(wget -qO- https://raw.githubusercontent.com/mozaroc/x-ui-pro/refs/heads/master/randomfakehtml.sh) 2>/dev/null; then
-        ok "Fake site (randomfakehtml)"
+phase14_fakesite() {
+    title "Фаза 14 / Фейковый сайт"
+
+    local FAKESITE_URL="https://raw.githubusercontent.com/mozaroc/x-ui-pro/master/randomfakehtml.sh"
+
+    if wget -q --timeout=30 --tries=2 -O /tmp/randomfakehtml.sh "$FAKESITE_URL"; then
+        bash /tmp/randomfakehtml.sh
+        rm -f /tmp/randomfakehtml.sh
+        ok "Фейковый сайт установлен"
     else
-        echo '<html><head><title>Welcome</title><style>body{font-family:Arial,sans-serif;margin:40px;background:#f5f5f5}.c{max-width:800px;margin:0 auto;background:#fff;padding:30px;border-radius:8px;box-shadow:0 2px 4px rgba(0,0,0,.1)}</style></head><body><div class="c"><h1>Welcome</h1><p>Site under construction.</p></div></body></html>' > /var/www/html/index.html
-        ok "Fake site (fallback)"
+        # Fallback — минимальный фейк
+        mkdir -p /var/www/html
+        cat > /var/www/html/index.html << 'FAKEEOF'
+<!DOCTYPE html>
+<html><head><title>Welcome</title></head>
+<body><h1>It works!</h1><p>This server is running.</p></body>
+</html>
+FAKEEOF
+        warn "randomfakehtml недоступен, установлена заглушка"
     fi
 }
 
 # =============================================================================
-# ФАЗА 14 — FIX v1.6: добавлен NODE_PORT
+# ФАЗА 15: Certbot auto-renew + проверка
 # =============================================================================
-phase14_ufw() {
-    title "Фаза 14 / UFW"
-    echo "  Файрвол разрешает только необходимые порты:"
-    echo "    SSH(${SSH_PORT}), HTTP(80), HTTPS/Xray(443),"
-    echo "    Node API(${NODE_PORT}) — для связи панели с нодой,"
-    echo "    Node Exporter(9100) — только с ${MASTER_IP}"
-    echo ""
-    ufw --force reset
-    ufw default deny incoming; ufw default allow outgoing
+phase15_certbot_timer() {
+    title "Фаза 15 / Certbot auto-renew"
+
+    # Certbot ставит свой systemd timer, проверяем что он активен
+    if systemctl is-enabled certbot.timer &>/dev/null; then
+        ok "Certbot timer активен (автопродление SSL)"
+    else
+        systemctl enable --now certbot.timer 2>/dev/null || true
+        ok "Certbot timer включён"
+    fi
+
+    # Хук для перезапуска nginx после обновления сертификатов
+    mkdir -p /etc/letsencrypt/renewal-hooks/post
+    cat > /etc/letsencrypt/renewal-hooks/post/restart-nginx.sh << 'CERTEOF'
+#!/bin/bash
+systemctl reload nginx
+CERTEOF
+    chmod +x /etc/letsencrypt/renewal-hooks/post/restart-nginx.sh
+    ok "Post-renewal hook: nginx reload"
+}
+
+# =============================================================================
+# ФАЗА 16: Unattended Upgrades
+# =============================================================================
+phase16_unattended() {
+    title "Фаза 16 / Автообновления безопасности"
+
+    cat > /etc/apt/apt.conf.d/20auto-upgrades << 'UUEOF'
+APT::Periodic::Update-Package-Lists "1";
+APT::Periodic::Unattended-Upgrade "1";
+APT::Periodic::AutocleanInterval "7";
+UUEOF
+
+    cat > /etc/apt/apt.conf.d/50unattended-upgrades << 'UU2EOF'
+Unattended-Upgrade::Allowed-Origins {
+    "${distro_id}:${distro_codename}-security";
+    "${distro_id}ESMApps:${distro_codename}-apps-security";
+};
+Unattended-Upgrade::AutoFixInterruptedDpkg "true";
+Unattended-Upgrade::Remove-Unused-Kernel-Packages "true";
+Unattended-Upgrade::Remove-Unused-Dependencies "true";
+Unattended-Upgrade::Automatic-Reboot "false";
+UU2EOF
+
+    ok "Security-патчи ставятся автоматически (без reboot)"
+}
+
+# =============================================================================
+# ФАЗА 17: Watchdog
+# =============================================================================
+phase17_watchdog() {
+    title "Фаза 17 / Watchdog"
+
+    cat > /usr/local/bin/watchdog-remnanode.sh << 'WDEOF'
+#!/bin/bash
+# Проверяет что remnanode жив. Если нет — перезапускает.
+# Запускается через cron каждые 5 минут.
+
+LOG="/var/log/remnanode/watchdog.log"
+TS=$(date "+%Y-%m-%d %H:%M:%S")
+
+if ! docker ps --format '{{.Names}}' | grep -q '^remnanode$'; then
+    echo "[$TS] ALERT: remnanode не запущен, перезапускаю..." >> "$LOG"
+    cd /opt/remnanode && docker compose up -d >> "$LOG" 2>&1
+    echo "[$TS] Перезапуск завершён" >> "$LOG"
+fi
+
+# Проверяем nginx
+if ! systemctl is-active --quiet nginx; then
+    echo "[$TS] ALERT: nginx упал, перезапускаю..." >> "$LOG"
+    systemctl restart nginx >> "$LOG" 2>&1
+fi
+WDEOF
+
+    chmod +x /usr/local/bin/watchdog-remnanode.sh
+
+    local CRON_WD="*/5 * * * * /usr/local/bin/watchdog-remnanode.sh"
+    local CURRENT_CRON=""
+    CURRENT_CRON=$(crontab -l 2>/dev/null || true)
+    if ! echo "$CURRENT_CRON" | grep -qF "watchdog-remnanode"; then
+        echo "${CURRENT_CRON:+$CURRENT_CRON
+}${CRON_WD}" | crontab -
+    fi
+
+    ok "Watchdog: проверка remnanode + nginx каждые 5 мин"
+}
+
+# =============================================================================
+# ФАЗА 18: Автоочистка
+# =============================================================================
+phase18_cleanup() {
+    title "Фаза 18 / Автоочистка"
+
+    # Docker prune раз в неделю (воскресенье 04:00)
+    local CRON_PRUNE="0 4 * * 0 docker system prune -f >> /var/log/remnanode/docker-prune.log 2>&1"
+    local CURRENT_CRON=""
+    CURRENT_CRON=$(crontab -l 2>/dev/null || true)
+    if ! echo "$CURRENT_CRON" | grep -qF "docker system prune"; then
+        echo "${CURRENT_CRON:+$CURRENT_CRON
+}${CRON_PRUNE}" | crontab -
+    fi
+
+    # Logrotate для наших логов
+    cat > /etc/logrotate.d/remnanode << 'LREOF'
+/var/log/remnanode/*.log {
+    weekly
+    rotate 4
+    compress
+    delaycompress
+    missingok
+    notifempty
+    create 0640 root root
+}
+LREOF
+
+    ok "Docker prune: воскресенье 04:00 | Логи: ротация 4 недели"
+}
+
+# =============================================================================
+# ФАЗА 19: UFW
+# =============================================================================
+phase19_ufw() {
+    title "Фаза 19 / UFW Firewall"
+
+    ufw --force reset >/dev/null
+    ufw default deny incoming
+    ufw default allow outgoing
+
     ufw allow "${SSH_PORT}/tcp" comment "SSH"
-    ufw allow 80/tcp comment "HTTP"
-    ufw allow 443/tcp comment "HTTPS/Xray"
-    ufw allow "${NODE_PORT}/tcp" comment "remnawave-node API"
-    ufw allow from "${MASTER_IP}" to any port 9100 proto tcp comment "Node Exporter"
+    ufw allow 80/tcp comment "HTTP (certbot + redirect)"
+    ufw allow 443/tcp comment "HTTPS / Xray"
+    ufw allow "${NODE_PORT}/tcp" comment "Remnawave node"
+    ufw allow from "${MASTER_IP}" to any port 9100 proto tcp comment "Node Exporter (master only)"
+
     ufw --force enable
-    ok "UFW: SSH(${SSH_PORT}), 80, 443, ${NODE_PORT}, 9100(${MASTER_IP})"
+    ok "UFW: SSH=${SSH_PORT}, HTTP=80, HTTPS=443, Node=${NODE_PORT}, Exporter=9100 (master)"
 }
 
 # =============================================================================
-# ФАЗА 15
+# ФАЗА 20: Итог
 # =============================================================================
-phase15_summary() {
+phase20_summary() {
+    title "Готово!"
     echo ""
-    echo -e "${G}╔════════════════════════════════════════════════════════════════╗${NC}"
-    echo -e "${G}║           remnawave-node v1.6 — развёрнут!                    ║${NC}"
-    echo -e "${G}╚════════════════════════════════════════════════════════════════╝${NC}"
-    echo ""
-    printf "  %-22s ${C}%s${NC}\n" "Server IP:" "$SERVER_IP"
-    printf "  %-22s %s\n" "Connection:" "$CONNECTION_DOMAIN"
-    printf "  %-22s %s\n" "SNI:" "$SNI_DOMAIN"
-    printf "  %-22s %s\n" "Profile:" "$PROFILE_NAME"
-    printf "  %-22s %s\n" "Private Key:" "$XRAY_PRIVATE_KEY"
-    printf "  %-22s %s\n" "Public Key:" "$XRAY_PUBLIC_KEY"
-    [[ "$SSH_PORT" != "22" ]] && printf "  %-22s ${Y}%s ← НОВЫЙ!${NC}\n" "SSH:" "$SSH_PORT"
-
-    echo ""
-    echo -e "${B}  ┌──────────────────────────────────────────────────────────────┐${NC}"
-    echo -e "${B}  │          ЧЕКЛИСТ В ПАНЕЛИ (5 шагов, все обязательные)        │${NC}"
-    echo -e "${B}  └──────────────────────────────────────────────────────────────┘${NC}"
-    echo ""
-    echo "  1. ${B}Nodes${NC} → убедись что нода ${G}Online${NC} (зелёный статус)"
-    echo "     Если Offline: docker logs remnanode --tail=20"
-    echo ""
-    echo "  2. ${B}Nodes${NC} → ${PROFILE_NAME} → включи ${Y}Host visibility${NC}"
-    echo "     Без этого нода не попадёт в подписки клиентов."
-    echo ""
-    echo "  3. ${B}Hosts${NC} → создай хост для ноды:"
-    echo "     • Инбаунд: ${PROFILE_NAME}"
-    echo "     • Адрес: ${CONNECTION_DOMAIN}"
-    echo "     • Port: ${Y}443${NC} (не 8443!)"
-    echo "     • SNI: ${SNI_DOMAIN}"
-    echo ""
-    echo "  4. ${B}Internal Squads${NC} → Default-Squad → добавь инбаунд ${PROFILE_NAME}"
-    echo "     ${R}⚠ БЕЗ ЭТОГО ШАГА НОДА НЕ ПОЯВИТСЯ В ПОДПИСКАХ!${NC}"
-    echo ""
-    echo "  5. ${B}На клиенте${NC} (Happ/v2rayNG) → обнови подписку вручную"
-    echo ""
-    echo -e "${B}  Команды:${NC}"
-    echo "  docker logs remnanode --tail=20             # логи"
-    echo "  cd /opt/remnanode && docker compose restart  # перезапуск"
-    echo "  /usr/local/bin/update-geo-dat.sh            # обновить geo"
+    echo -e "  ${G}╔══════════════════════════════════════════════════════════════╗${NC}"
+    echo -e "  ${G}║${NC}  ${B}remnawave-node v2.0 — деплой завершён${NC}"
+    echo -e "  ${G}╠══════════════════════════════════════════════════════════════╣${NC}"
+    echo -e "  ${G}║${NC}  Сервер:       ${SERVER_IP}"
+    echo -e "  ${G}║${NC}  Connection:   ${CONNECTION_DOMAIN}"
+    echo -e "  ${G}║${NC}  SNI:          ${SNI_DOMAIN}"
+    echo -e "  ${G}║${NC}  Profile:      ${PROFILE_NAME}"
+    echo -e "  ${G}╠══════════════════════════════════════════════════════════════╣${NC}"
+    echo -e "  ${G}║${NC}  ${B}SSH доступ:${NC}"
+    echo -e "  ${G}║${NC}  ssh ${ADMIN_USER}@${SERVER_IP} -p ${SSH_PORT}"
+    echo -e "  ${G}║${NC}  Пользователь: ${ADMIN_USER} (sudo, docker)"
+    echo -e "  ${G}║${NC}  Root-логин: ОТКЛЮЧЁН"
+    echo -e "  ${G}║${NC}  Пароли: ОТКЛЮЧЕНЫ (только SSH-ключ)"
+    echo -e "  ${G}╠══════════════════════════════════════════════════════════════╣${NC}"
+    echo -e "  ${G}║${NC}  ${B}Безопасность:${NC}"
+    echo -e "  ${G}║${NC}  fail2ban: SSH + nginx"
+    echo -e "  ${G}║${NC}  UFW: deny all, allow SSH/${SSH_PORT}, 80, 443, ${NODE_PORT}"
+    echo -e "  ${G}║${NC}  sysctl: BBR, SYN flood protection, TCP tuning"
+    echo -e "  ${G}║${NC}  Автопатчи: unattended-upgrades (security)"
+    echo -e "  ${G}╠══════════════════════════════════════════════════════════════╣${NC}"
+    echo -e "  ${G}║${NC}  ${B}Автоматизация:${NC}"
+    echo -e "  ${G}║${NC}  Geo-update:    ежедневно 03:00"
+    echo -e "  ${G}║${NC}  Watchdog:      каждые 5 мин (remnanode + nginx)"
+    echo -e "  ${G}║${NC}  Docker prune:  воскресенье 04:00"
+    echo -e "  ${G}║${NC}  Log rotation:  4 недели"
+    echo -e "  ${G}╠══════════════════════════════════════════════════════════════╣${NC}"
+    echo -e "  ${G}║${NC}  ${B}Действия в панели Remnawave:${NC}"
+    echo -e "  ${G}║${NC}  1. Nodes → нода = ${G}Online${NC}"
+    echo -e "  ${G}║${NC}  2. Включи «Host visibility»"
+    echo -e "  ${G}║${NC}  3. Проверь профиль ${PROFILE_NAME}"
+    echo -e "  ${G}╠══════════════════════════════════════════════════════════════╣${NC}"
+    echo -e "  ${G}║${NC}  ${B}Полезные команды:${NC}"
+    echo -e "  ${G}║${NC}  docker compose -C ${NODE_DIR} logs -f"
+    echo -e "  ${G}║${NC}  docker compose -C ${NODE_DIR} restart"
+    echo -e "  ${G}║${NC}  /usr/local/bin/update-geo-dat.sh"
+    echo -e "  ${G}║${NC}  /usr/local/bin/watchdog-remnanode.sh"
+    echo -e "  ${G}║${NC}  sudo fail2ban-client status sshd"
+    echo -e "  ${G}║${NC}  sudo ufw status"
+    echo -e "  ${G}╚══════════════════════════════════════════════════════════════╝${NC}"
     echo ""
 }
 
+# =============================================================================
+# MAIN
 # =============================================================================
 main() {
     clear
     echo -e "${C}"
     echo "  ┌──────────────────────────────────────────────────────┐"
-    echo "  │        remnawave-node  •  deploy script  v1.6       │"
-    echo "  │        github.com/anfixit/routerus                  │"
+    echo "  │      remnawave-node  •  deploy script  v2.0         │"
+    echo "  │      github.com/anfixit/routerus                    │"
+    echo "  │                                                      │"
+    echo "  │      Hardened: admin user, SSH key-only,            │"
+    echo "  │      fail2ban, BBR, watchdog, auto-updates          │"
     echo "  └──────────────────────────────────────────────────────┘"
     echo -e "${NC}"
-    phase0_checks; phase1_input; phase2_deps; phase3_docker; phase4_ssh
-    phase5_ssl; phase6_nginx; phase7_keygen; phase8_secret; phase9_geo
-    phase10_node; phase11_geocron; phase12_node_exporter; phase13_fakesite
-    phase14_ufw; phase15_summary
+
+    phase0_checks
+    phase1_input
+    phase2_deps
+    phase3_docker
+    phase4_admin_user
+    phase5_ssh_hardening
+    phase6_fail2ban
+    phase7_sysctl
+    phase8_ssl
+    phase9_nginx
+    phase10_keygen
+    phase11_node
+    phase12_geo
+    phase13_node_exporter
+    phase14_fakesite
+    phase15_certbot_timer
+    phase16_unattended
+    phase17_watchdog
+    phase18_cleanup
+    phase19_ufw
+    phase20_summary
 }
+
 main "$@"
