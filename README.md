@@ -1,137 +1,158 @@
 # routerus
 
-> Автоматическое развёртывание ноды [Remnawave](https://remna.st) на Ubuntu 24.04
+Deploy-скрипт для разворачивания VPN-нод на базе [Remnawave](https://github.com/remnawave) + VLESS Reality с полным hardening сервера.
 
----
+## Что делает скрипт
+
+Одной командой на чистом Ubuntu 24.04 поднимает готовую VPN-ноду:
+
+**VPN:**
+- remnawave-node (Docker) с VLESS + Reality
+- nginx stream SNI routing (порт 443 → Xray / HTTPS / Reality fallback)
+- SSL-сертификаты Let's Encrypt с автопродлением
+- Geo-файлы (runetfreedom) для маршрутизации и блокировки рекламы
+- Фейковый сайт для маскировки
+
+**Безопасность:**
+- Пользователь `admin` с sudo (root-логин отключён)
+- SSH: нестандартный порт, только по ключу, пароли отключены
+- fail2ban: защита SSH + nginx от брутфорса
+- UFW: deny all, whitelist только нужных портов
+- sysctl: BBR, SYN flood protection, TCP tuning, conntrack 262K
+- Автоматические security-патчи (unattended-upgrades)
+
+**Автоматизация:**
+- Watchdog: проверка remnanode + nginx каждые 5 мин
+- Geo-update: ежедневно в 03:00
+- Docker prune: еженедельно
+- Logrotate: ротация логов 4 недели
+- Certbot auto-renew с nginx reload hook
 
 ## Быстрый старт
 
+### Подготовка
+
+1. Купить VPS (Ubuntu 24.04, минимум 1 CPU / 1 GB RAM)
+2. Направить 2 домена на IP сервера (рекомендую [duckdns.org](https://www.duckdns.org)):
+   - **Connection** — адрес подключения клиентов
+   - **SNI** — домен для Reality маскировки
+3. В панели Remnawave создать Config Profile и ноду → скопировать SECRET KEY
+4. На своём компьютере подготовить SSH-ключ:
+   ```bash
+   # Проверить наличие ключа
+   cat ~/.ssh/id_ed25519.pub
+   
+   # Если нет — сгенерировать
+   ssh-keygen -t ed25519 -C "your@email.com"
+   ```
+
+### Установка
+
 ```bash
+ssh root@IP_СЕРВЕРА
 bash <(wget -qO- https://raw.githubusercontent.com/anfixit/routerus/main/deploy-remnanode.sh)
 ```
 
-## Требования
+Скрипт интерактивно спросит: SECRET KEY, домены, SSH-ключ, порты.
 
-- Ubuntu 24.04, root-доступ
-- Работающая панель Remnawave на отдельном VPS
-- Два домена (бесплатно: [duckdns.org](https://www.duckdns.org))
+### После установки
 
-## Flow скрипта v1.5
+1. В панели Remnawave: Nodes → нода должна быть **Online**
+2. Включить **Host visibility**
+3. Обновить Config Profile (privateKey из вывода скрипта)
+4. Подключение к серверу: `ssh admin@IP -p 2810`
 
-```
-SSH на новый сервер
-         ↓
-Запуск скрипта → ввод доменов, имени профиля, портов
-         ↓
-Установка: пакеты → Docker → SSL → nginx
-         ↓
-Генерация x25519 ключей → вывод готового JSON для Config Profile
-         ↓
-  Профиль есть? → НЕТ → выводит JSON → пауза → создай в панели
-                  ДА  → обнови privateKey → пауза
-         ↓
-Создай ноду в панели → скопируй SECRET_KEY → вставь в скрипт
-         ↓
-Geo-файлы → контейнер → cron → Node Exporter → fake site → UFW
-         ↓
-Нода Online → выполни чеклист в панели (5 шагов)
-```
-
-## Чеклист после деплоя (ВСЕ ШАГИ ОБЯЗАТЕЛЬНЫЕ)
-
-| # | Где | Что сделать |
-|---|-----|-------------|
-| 1 | Nodes | Убедись что нода **Online** (зелёный) |
-| 2 | Nodes → нода | Включи **Host visibility** |
-| 3 | Hosts | Создай хост: инбаунд = имя профиля, адрес = connection domain, порт = 443, SNI = sni domain |
-| 4 | **Internal Squads** → Default-Squad | **Добавь инбаунд новой ноды** ⚠️ без этого нода НЕ появится в подписках |
-| 5 | Клиент (Happ/v2rayNG) | Обнови подписку вручную |
-
-## Happ Routing (клиентская маршрутизация)
-
-Панель → Settings → Subscription settings → Happ Routing
-
-```json
-{
-  "Name": "AnfiVPN",
-  "GlobalProxy": "true",
-  "RouteOrder": "block-proxy-direct",
-  "RemoteDNSType": "DoH",
-  "RemoteDNSDomain": "https://8.8.8.8/dns-query",
-  "RemoteDNSIP": "8.8.8.8",
-  "DomesticDNSType": "DoH",
-  "DomesticDNSDomain": "https://94.140.14.14/dns-query",
-  "DomesticDNSIP": "94.140.14.14",
-  "Geoipurl": "https://cdn.jsdelivr.net/gh/hydraponique/roscomvpn-geoip@release/geoip.dat",
-  "Geositeurl": "https://cdn.jsdelivr.net/gh/hydraponique/roscomvpn-geosite@release/geosite.dat",
-  "LastUpdated": "1774450000",
-  "DnsHosts": {
-    "lkfl2.nalog.ru": "213.24.64.175",
-    "lknpd.nalog.ru": "213.24.64.181"
-  },
-  "DirectSites": [
-    "geosite:private", "geosite:category-ru", "geosite:microsoft",
-    "geosite:apple", "geosite:google-play", "geosite:epicgames",
-    "geosite:steam", "geosite:origin", "geosite:twitch", "geosite:pinterest"
-  ],
-  "DirectIp": ["geoip:private", "geoip:direct"],
-  "ProxySites": ["geosite:youtube", "geosite:telegram", "geosite:github", "geosite:twitch-ads"],
-  "ProxyIp": [],
-  "BlockSites": [
-    "geosite:category-ads", "geosite:win-spy", "geosite:torrent",
-    "domain:google-analytics.com", "domain:googletagmanager.com",
-    "domain:googletagservices.com", "domain:doubleclick.net",
-    "domain:googlesyndication.com", "domain:googleadservices.com",
-    "domain:scorecardresearch.com", "domain:quantserve.com",
-    "domain:adnxs.com", "domain:moatads.com", "domain:firebase.io",
-    "domain:crashlytics.com", "domain:app-measurement.com", "domain:appcenter.ms"
-  ],
-  "BlockIp": [],
-  "DomainStrategy": "IPIfNonMatch",
-  "FakeDNS": "false",
-  "UseChunkFiles": "true"
-}
-```
-
-## Блокировка рекламы — 3 уровня
-
-| Уровень | Что | Для какого трафика |
-|---------|-----|--------------------|
-| Сервер (Config Profile) | category-ads-all + win-spy + 14 доменов | VPN-трафик |
-| Клиент (Happ BlockSites) | category-ads + win-spy + 14 доменов | Весь трафик |
-| DNS (AdGuard 94.140.14.14) | Рекламные домены | Прямой трафик (.ru, yandex, vk) |
-
-## Архитектура nginx
+## Архитектура ноды
 
 ```
-Клиент → :443
-           ├─ SNI = sni-domain    → :8443 (Xray Reality)
-           └─ SNI = conn-domain   → :7443 (HTTPS)
-Reality fallback                  → :9443 (fake site)
+Клиент → порт 443 → nginx stream (SNI routing)
+  ├── SNI = connection-domain → Xray (8443) — VPN-трафик
+  ├── SNI = sni-domain        → Reality fallback (9443) — фейковый сайт
+  └── HTTPS-запрос            → nginx (7443) — фейковый сайт
 ```
 
-## Команды
+DPI/провайдер видит обычный HTTPS к легитимному домену. Трафик неотличим от браузера.
+
+## Маршрутизация и блокировка рекламы
+
+Два уровня:
+
+**Сервер** (Config Profile в Remnawave):
+- Блокировка: `geosite:category-ads-all`, `geosite:win-spy`, явные рекламные домены
+- DIRECT: торренты, приватные сети
+- Блокировка: QUIC/HTTP3 (UDP 443), уязвимые UDP-порты
+
+**Клиент** (Happ routing):
+- Российские сайты (`geosite:category-ru`) → напрямую
+- Реклама → блокировка
+- Всё остальное → через VPN
+- DNS: AdGuard 94.140.14.14 (блокирует рекламу для прямого трафика)
+
+## Полезные команды
 
 ```bash
-docker logs remnanode --tail=20                    # логи
-cd /opt/remnanode && docker compose restart         # перезапуск
-/usr/local/bin/update-geo-dat.sh                   # обновить geo
-cat /var/log/remnanode/geo-update.log              # лог обновлений
+# Логи ноды
+docker compose -C /opt/remnanode logs -f
+
+# Перезапуск
+docker compose -C /opt/remnanode restart
+
+# Обновить geo-файлы вручную
+sudo /usr/local/bin/update-geo-dat.sh
+
+# Статус watchdog
+cat /var/log/remnanode/watchdog.log
+
+# fail2ban
+sudo fail2ban-client status sshd
+
+# Firewall
+sudo ufw status
 ```
 
-## Бесплатные домены
+## Фазы скрипта
 
-| Сервис | Лимит |
-|--------|-------|
-| ⭐ [duckdns.org](https://www.duckdns.org) | 5 поддоменов |
-| [dynu.com](https://www.dynu.com) | ∞ |
-| [afraid.org](https://freedns.afraid.org) | 5 |
-| [noip.com](https://www.noip.com) | 3 (подтверждение раз/мес) |
+| # | Фаза | Описание |
+|---|------|----------|
+| 0 | Проверки | root, Ubuntu 24.04, определение IP |
+| 1 | Параметры | SECRET KEY, домены, SSH-ключ, порты |
+| 2 | Зависимости | nginx, certbot, fail2ban, jq и др. |
+| 3 | Docker | Установка Docker + compose plugin |
+| 4 | Admin user | Пользователь admin, sudo, SSH-ключ, docker-группа |
+| 5 | SSH hardening | Порт 2810, key-only, root отключён |
+| 6 | fail2ban | SSH + nginx brute-force protection |
+| 7 | Kernel tuning | BBR, TCP buffers, SYN flood, conntrack |
+| 8 | SSL | Let's Encrypt для обоих доменов |
+| 9 | nginx | stream SNI routing (443 → 8443/7443/9443) |
+| 10 | x25519 keygen | Генерация ключей Reality + пауза для панели |
+| 11 | remnawave-node | docker-compose.yml + daemon.json |
+| 12 | Geo-файлы | geosite.dat + geoip.dat + cron 03:00 |
+| 13 | Node Exporter | Prometheus метрики (порт 9100) |
+| 14 | Фейковый сайт | randomfakehtml для маскировки |
+| 15 | Certbot timer | Автопродление SSL + nginx reload hook |
+| 16 | Auto-updates | unattended-upgrades (security) |
+| 17 | Watchdog | Проверка remnanode + nginx каждые 5 мин |
+| 18 | Автоочистка | Docker prune + logrotate |
+| 19 | UFW | Финальные правила файрвола |
+| 20 | Итог | Сводка параметров и команд |
 
-## Credits
+## Бесплатные DNS
+
+| Сервис | Лимит | Особенности |
+|--------|-------|-------------|
+| [duckdns.org](https://www.duckdns.org) | 5 поддоменов | Вход через GitHub/Google (рекомендую) |
+| [dynu.com](https://www.dynu.com) | ∞ | Поддержка IPv6, свои домены |
+| [afraid.org](https://freedns.afraid.org) | 5 поддоменов | 55K+ доменных зон |
+| [noip.com](https://www.noip.com) | 3 хоста | Подтверждение раз в 30 дней |
+
+## Источники
 
 - [Remnawave](https://github.com/remnawave) — панель и нода
-- [runetfreedom](https://github.com/runetfreedom/russia-v2ray-rules-dat) — geo-файлы на нодах
-- [hydraponique](https://github.com/hydraponique/roscomvpn-geosite) — geo-файлы для Happ
+- [runetfreedom/russia-v2ray-rules-dat](https://github.com/runetfreedom/russia-v2ray-rules-dat) — geo-файлы (сервер)
+- [hydraponique](https://github.com/hydraponique/roscomvpn-geosite) — geo-файлы (Happ/клиент)
 - [mozaroc/x-ui-pro](https://github.com/mozaroc/x-ui-pro) — randomfakehtml
 - [Prometheus Node Exporter](https://github.com/prometheus/node_exporter)
+
+## Лицензия
+
+MIT
