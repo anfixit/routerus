@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # =============================================================================
-# deploy-remnanode.sh v2.1
+# deploy-remnanode.sh v2.2
 # Разворачивает remnawave-node на чистом Ubuntu 24.04 с полным hardening
 #
 # Использование:
@@ -468,17 +468,19 @@ phase8_ssl() {
 phase9_nginx() {
     title "Фаза 9 / nginx"
     echo "  Порт 443 → SNI routing:"
-    echo "    ${CONNECTION_DOMAIN} → Xray (8443)"
-    echo "    ${SNI_DOMAIN}        → HTTPS (7443) + Reality fallback (9443)"
+    echo "    ${SNI_DOMAIN} (клиент шлёт этот SNI) → Xray (8443)"
+    echo "    ${CONNECTION_DOMAIN} (проббер)       → Reality fallback (9443)"
     echo ""
 
     # ── stream SNI ────────────────────────────────────────────────────────────
+    # ВАЖНО: клиент шлёт SNI = serverNames[0] из Reality (это SNI_DOMAIN)
+    # Поэтому SNI_DOMAIN → xray, CONNECTION_DOMAIN → reality (fallback для пробберов)
     mkdir -p /etc/nginx/stream-enabled
 
     cat > /etc/nginx/stream-enabled/stream.conf << STRMEOF
 map \$ssl_preread_server_name \$sni_name {
-    ${CONNECTION_DOMAIN}    xray;
-    ${SNI_DOMAIN}           reality;
+    ${SNI_DOMAIN}           xray;
+    ${CONNECTION_DOMAIN}    reality;
     default                 xray;
 }
 
@@ -505,16 +507,14 @@ STRMEOF
     fi
 
     # ── HTTPS site (порт 7443) ────────────────────────────────────────────────
+    # БЕЗ proxy_protocol — сюда трафик приходит не от nginx stream
     cat > /etc/nginx/sites-available/node-https.conf << HTTPEOF
 server {
-    listen 7443 ssl proxy_protocol;
+    listen 7443 ssl;
     server_name ${CONNECTION_DOMAIN} ${SNI_DOMAIN};
 
     ssl_certificate     /etc/letsencrypt/live/${CONNECTION_DOMAIN}/fullchain.pem;
     ssl_certificate_key /etc/letsencrypt/live/${CONNECTION_DOMAIN}/privkey.pem;
-
-    set_real_ip_from 127.0.0.1;
-    real_ip_header proxy_protocol;
 
     location / {
         root /var/www/html;
@@ -524,16 +524,14 @@ server {
 HTTPEOF
 
     # ── Reality fallback (порт 9443) ──────────────────────────────────────────
+    # БЕЗ proxy_protocol — Reality dest шлёт обычный TLS
     cat > /etc/nginx/sites-available/node-reality.conf << REALEOF
 server {
-    listen 9443 ssl proxy_protocol;
+    listen 9443 ssl;
     server_name ${SNI_DOMAIN};
 
     ssl_certificate     /etc/letsencrypt/live/${SNI_DOMAIN}/fullchain.pem;
     ssl_certificate_key /etc/letsencrypt/live/${SNI_DOMAIN}/privkey.pem;
-
-    set_real_ip_from 127.0.0.1;
-    real_ip_header proxy_protocol;
 
     location / {
         root /var/www/html;
@@ -560,6 +558,10 @@ R80EOF
 
     # Убираем конфликтный load_module (Ubuntu 24.04 грузит через modules-enabled)
     sed -i '/load_module.*ngx_stream_module/d' /etc/nginx/nginx.conf
+
+    # Фейковый сайт (чтобы nginx не отдавал 403)
+    mkdir -p /var/www/html
+    [[ -f /var/www/html/index.html ]] || echo "<html><body><h1>Welcome</h1></body></html>" > /var/www/html/index.html
 
     nginx -t || die "nginx конфиг невалиден"
     systemctl enable --now nginx
@@ -610,6 +612,7 @@ phase10_keygen() {
     echo ""
 
     # Сохраняем ключи для docker-compose
+    mkdir -p "${NODE_DIR}"
     echo "$PRIVATE_KEY" > "${NODE_DIR}/.private_key"
     echo "$PUBLIC_KEY" > "${NODE_DIR}/.public_key"
 
@@ -966,7 +969,7 @@ phase20_summary() {
     title "Готово!"
     echo ""
     echo -e "  ${G}╔══════════════════════════════════════════════════════════════╗${NC}"
-    echo -e "  ${G}║${NC}  ${B}remnawave-node v2.1 — деплой завершён${NC}"
+    echo -e "  ${G}║${NC}  ${B}remnawave-node v2.2 — деплой завершён${NC}"
     echo -e "  ${G}╠══════════════════════════════════════════════════════════════╣${NC}"
     echo -e "  ${G}║${NC}  Сервер:       ${SERVER_IP}"
     echo -e "  ${G}║${NC}  Connection:   ${CONNECTION_DOMAIN}"
@@ -1015,7 +1018,7 @@ main() {
     clear
     echo -e "${C}"
     echo "  ┌──────────────────────────────────────────────────────┐"
-    echo "  │      remnawave-node  •  deploy script  v2.1         │"
+    echo "  │      remnawave-node  •  deploy script  v2.2         │"
     echo "  │      github.com/anfixit/routerus                    │"
     echo "  │                                                      │"
     echo "  │      Hardened: admin user, SSH key-only,            │"
