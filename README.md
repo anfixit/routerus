@@ -1,158 +1,142 @@
 # routerus
 
-Deploy-скрипт для разворачивания VPN-нод на базе [Remnawave](https://github.com/remnawave) + VLESS Reality с полным hardening сервера.
+Скрипты для развёртывания и управления инфраструктурой **AnfiVPN** — коммерческого VPN-сервиса на базе [Remnawave Panel](https://github.com/remnawave/panel) + [Xray-core](https://github.com/XTLS/Xray-core).
 
-## Что делает скрипт
+## Архитектура
 
-Одной командой на чистом Ubuntu 24.04 поднимает готовую VPN-ноду:
+```
+Клиент (Happ / v2rayNG / Hiddify)
+    │
+    ▼
+Xray:443 (VLESS + Reality + XHTTP)
+    │
+    ├── Reality-клиент → VPN-туннель → интернет
+    │
+    └── Не-Reality (DPI / проббер)
+            │
+            ▼
+        nginx:8443 (настоящий сайт с SSL)
+```
 
-**VPN:**
-- remnawave-node (Docker) с VLESS + Reality
-- nginx stream SNI routing (порт 443 → Xray / HTTPS / Reality fallback)
-- SSL-сертификаты Let's Encrypt с автопродлением
-- Geo-файлы (runetfreedom) для маршрутизации и блокировки рекламы
-- Фейковый сайт для маскировки
+**Протокол:** VLESS + Reality + XHTTP (steal_oneself)
 
-**Безопасность:**
-- Пользователь `admin` с sudo (root-логин отключён)
-- SSH: нестандартный порт, только по ключу, пароли отключены
-- fail2ban: защита SSH + nginx от брутфорса
-- UFW: deny all, whitelist только нужных портов
-- sysctl: BBR, SYN flood protection, TCP tuning, conntrack 262K
-- Автоматические security-патчи (unattended-upgrades)
+**Почему именно так:**
 
-**Автоматизация:**
-- Watchdog: проверка remnanode + nginx каждые 5 мин
-- Geo-update: ежедневно в 03:00
-- Docker prune: еженедельно
-- Logrotate: ротация логов 4 недели
-- Certbot auto-renew с nginx reload hook
+- **XHTTP** — трафик неотличим от обычных HTTP-запросов. После массовой блокировки VLESS TCP 17.02.2026, XHTTP остался рабочим
+- **Reality** — TLS-маскировка без собственного сертификата. Пробберы и DPI видят легитимный TLS-хендшейк
+- **steal_oneself** — маскируемся под свой же nginx на том же сервере. SNI резолвится на наш IP → настоящий сайт → всё легитимно. Рекомендация RPRX (разработчик Reality)
+- **Один домен на ноду** — упрощает настройку, дешевле, безопаснее
+
+## Содержимое репозитория
+
+```
+routerus/
+├── deploy-remnanode.sh    ← Deploy script v3.0
+└── README.md
+```
+
+### deploy-remnanode.sh v3.0
+
+Полностью автоматизированный деплой VPN-ноды на чистом Ubuntu 24.04.
+
+**Что делает (17 фаз):**
+
+1. Проверяет ОС и интернет
+2. Спрашивает домен, SSH-ключ, имя ноды
+3. Ставит Docker, nginx, certbot, fail2ban
+4. Создаёт пользователя `admin` с SSH-ключом
+5. Хардит SSH (порт 2810, key-only, root запрещён)
+6. Настраивает fail2ban, sysctl (BBR, TCP buffers)
+7. Получает SSL-сертификат (Let's Encrypt)
+8. Настраивает nginx как HTTPS fallback на порту 8443
+9. Разворачивает фейковый сайт
+10. Генерирует x25519 ключи и выводит готовый JSON для Config Profile
+11. Ждёт пока ты создашь Config Profile и Node в панели Remnawave
+12. Запускает remnawave-node (Docker, `network_mode: host`)
+13. Скачивает geo-файлы (runetfreedom) + cron автообновления
+14. Настраивает Docker log rotation и автообновления безопасности
+15. Ставит watchdog (проверка контейнера каждые 5 минут)
+16. Настраивает UFW
+17. Опционально ставит Beszel agent
+18. Выводит чеклист для завершения настройки в панели
+
+**Требования:**
+
+- Чистый Ubuntu 24.04 VPS с выделенным IP
+- Домен с A-записью на IP сервера
+- Remnawave Panel (v2.7.2+ для XHTTP)
+- Xray-core v25.3.6+ (в Docker-образе remnawave/node)
 
 ## Быстрый старт
 
-### Подготовка
+### 1. Купи домен
 
-1. Купить VPS (Ubuntu 24.04, минимум 1 CPU / 1 GB RAM)
-2. Направить 2 домена на IP сервера (рекомендую [duckdns.org](https://www.duckdns.org)):
-   - **Connection** — адрес подключения клиентов
-   - **SNI** — домен для Reality маскировки
-3. В панели Remnawave создать Config Profile и ноду → скопировать SECRET KEY
-4. На своём компьютере подготовить SSH-ключ:
-   ```bash
-   # Проверить наличие ключа
-   cat ~/.ssh/id_ed25519.pub
-   
-   # Если нет — сгенерировать
-   ssh-keygen -t ed25519 -C "your@email.com"
-   ```
+На [reg.ru](https://reg.ru) — `.ru` от 129₽/год. Настрой DNS A-запись на IP сервера.
 
-### Установка
+### 2. Запусти скрипт
 
 ```bash
 ssh root@IP_СЕРВЕРА
 bash <(wget -qO- https://raw.githubusercontent.com/anfixit/routerus/main/deploy-remnanode.sh)
 ```
 
-Скрипт интерактивно спросит: SECRET KEY, домены, SSH-ключ, порты.
+Скрипт спросит:
+- Домен
+- Публичный SSH-ключ (`cat ~/.ssh/id_ed25519.pub`)
+- Имя ноды (например `DE_natty_narwhal`)
 
-### После установки
+### 3. Настрой в панели Remnawave
 
-1. В панели Remnawave: Nodes → нода должна быть **Online**
-2. Включить **Host visibility**
-3. Обновить Config Profile (privateKey из вывода скрипта)
-4. Подключение к серверу: `ssh admin@IP -p 2810`
+Скрипт выведет готовый JSON и пошаговую инструкцию:
 
-## Архитектура ноды
+1. **Config Profiles → Create** — вставить JSON
+2. **Nodes → Create** — указать IP и порт 2222, привязать профиль
+3. Ввести SECRET_KEY в скрипт → контейнер запустится
+4. **Hosts → Create** — Address и SNI = домен, Port = 443
+5. **Internal Squads → Default-Squad** — добавить inbound
 
-```
-Клиент → порт 443 → nginx stream (SNI routing)
-  ├── SNI = connection-domain → Xray (8443) — VPN-трафик
-  ├── SNI = sni-domain        → Reality fallback (9443) — фейковый сайт
-  └── HTTPS-запрос            → nginx (7443) — фейковый сайт
-```
-
-DPI/провайдер видит обычный HTTPS к легитимному домену. Трафик неотличим от браузера.
-
-## Маршрутизация и блокировка рекламы
-
-Два уровня:
-
-**Сервер** (Config Profile в Remnawave):
-- Блокировка: `geosite:category-ads-all`, `geosite:win-spy`, явные рекламные домены
-- DIRECT: торренты, приватные сети
-- Блокировка: QUIC/HTTP3 (UDP 443), уязвимые UDP-порты
-
-**Клиент** (Happ routing):
-- Российские сайты (`geosite:category-ru`) → напрямую
-- Реклама → блокировка
-- Всё остальное → через VPN
-- DNS: AdGuard 94.140.14.14 (блокирует рекламу для прямого трафика)
-
-## Полезные команды
+### 4. Проверь
 
 ```bash
-# Логи ноды
-docker compose -C /opt/remnanode logs -f
+# SSH доступ (из нового терминала!)
+ssh -p 2810 admin@IP_СЕРВЕРА
 
-# Перезапуск
-docker compose -C /opt/remnanode restart
-
-# Обновить geo-файлы вручную
-sudo /usr/local/bin/update-geo-dat.sh
-
-# Статус watchdog
-cat /var/log/remnanode/watchdog.log
-
-# fail2ban
-sudo fail2ban-client status sshd
-
-# Firewall
-sudo ufw status
+# Нода в панели — зелёная?
+# Happ — обнови подписку → пинг есть?
 ```
 
-## Фазы скрипта
+## Отличия от v2.2
 
-| # | Фаза | Описание |
-|---|------|----------|
-| 0 | Проверки | root, Ubuntu 24.04, определение IP |
-| 1 | Параметры | SECRET KEY, домены, SSH-ключ, порты |
-| 2 | Зависимости | nginx, certbot, fail2ban, jq и др. |
-| 3 | Docker | Установка Docker + compose plugin |
-| 4 | Admin user | Пользователь admin, sudo, SSH-ключ, docker-группа |
-| 5 | SSH hardening | Порт 2810, key-only, root отключён |
-| 6 | fail2ban | SSH + nginx brute-force protection |
-| 7 | Kernel tuning | BBR, TCP buffers, SYN flood, conntrack |
-| 8 | SSL | Let's Encrypt для обоих доменов |
-| 9 | nginx | stream SNI routing (443 → 8443/7443/9443) |
-| 10 | x25519 keygen | Генерация ключей Reality + пауза для панели |
-| 11 | remnawave-node | docker-compose.yml + daemon.json |
-| 12 | Geo-файлы | geosite.dat + geoip.dat + cron 03:00 |
-| 13 | Node Exporter | Prometheus метрики (порт 9100) |
-| 14 | Фейковый сайт | randomfakehtml для маскировки |
-| 15 | Certbot timer | Автопродление SSL + nginx reload hook |
-| 16 | Auto-updates | unattended-upgrades (security) |
-| 17 | Watchdog | Проверка remnanode + nginx каждые 5 мин |
-| 18 | Автоочистка | Docker prune + logrotate |
-| 19 | UFW | Финальные правила файрвола |
-| 20 | Итог | Сводка параметров и команд |
+| | v2.2 | v3.0 |
+|---|------|------|
+| Транспорт | TCP | XHTTP |
+| Домены | 2 (connection + SNI) | 1 (steal_oneself) |
+| Порт 443 | nginx stream → SNI routing | Xray напрямую |
+| nginx | stream router + 3 порта | fallback на 8443 |
+| proxy_protocol | nginx → Xray | Xray → nginx (xver: 1) |
+| Docker | bridge + port mapping | `network_mode: host` |
+| Beszel | ручной | интерактивно в скрипте |
+| Панель | инструкции в голове | чеклист в терминале |
 
-## Бесплатные DNS
+## История версий
 
-| Сервис | Лимит | Особенности |
-|--------|-------|-------------|
-| [duckdns.org](https://www.duckdns.org) | 5 поддоменов | Вход через GitHub/Google (рекомендую) |
-| [dynu.com](https://www.dynu.com) | ∞ | Поддержка IPv6, свои домены |
-| [afraid.org](https://freedns.afraid.org) | 5 поддоменов | 55K+ доменных зон |
-| [noip.com](https://www.noip.com) | 3 хоста | Подтверждение раз в 30 дней |
+| Версия | Дата | Изменения |
+|--------|------|-----------|
+| v3.0 | 2026-04-23 | XHTTP + steal_oneself, один домен, Xray на 443, Beszel в скрипте |
+| v2.2 | 2026-04-07 | 7 багфиксов: SNI map, proxy_protocol, x25519, SSH Ubuntu 24.04 |
+| v2.0 | 2026-04-05 | Полный hardening, admin user, fail2ban, sysctl |
+| v1.6 | 2026-04-01 | UFW node port, crontab pipefail, wget timeout |
+| v1.4 | 2026-03-31 | Новый flow с keygen до SECRET_KEY |
+| v1.0 | 2026-03-27 | Первая версия |
 
-## Источники
+## Мониторинг
 
-- [Remnawave](https://github.com/remnawave) — панель и нода
-- [runetfreedom/russia-v2ray-rules-dat](https://github.com/runetfreedom/russia-v2ray-rules-dat) — geo-файлы (сервер)
-- [hydraponique](https://github.com/hydraponique/roscomvpn-geosite) — geo-файлы (Happ/клиент)
-- [mozaroc/x-ui-pro](https://github.com/mozaroc/x-ui-pro) — randomfakehtml
-- [Prometheus Node Exporter](https://github.com/prometheus/node_exporter)
+[Beszel](https://github.com/henrygd/beszel) — hub на `23.88.3.239:51068`. Агенты на всех нодах (порт 45876). Deploy v3.0 предлагает установку агента интерактивно.
 
-## Лицензия
+## Ссылки
 
-MIT
+- [Remnawave Panel](https://github.com/remnawave/panel)
+- [Xray-core](https://github.com/XTLS/Xray-core)
+- [XHTTP документация](https://xtls.github.io/en/config/transport.html)
+- [chika0801/Xray-examples](https://github.com/chika0801/Xray-examples) — референсные конфиги
+- [runetfreedom/russia-v2ray-rules-dat](https://github.com/runetfreedom/russia-v2ray-rules-dat) — geo-файлы
