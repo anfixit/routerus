@@ -1,6 +1,6 @@
 # routerus
 
-Скрипты для развёртывания и управления инфраструктурой **AnfiVPN** — коммерческого VPN-сервиса на базе [Remnawave Panel](https://github.com/remnawave/panel) + [Xray-core](https://github.com/XTLS/Xray-core).
+Скрипт для развёртывания и управления инфраструктурой VPN-сервиса на базе [Remnawave Panel](https://github.com/remnawave/panel) + [Xray-core](https://github.com/XTLS/Xray-core).
 
 ## Архитектура
 
