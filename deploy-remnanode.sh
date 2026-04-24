@@ -303,17 +303,104 @@ RDEOF
 phase8_fakesite() {
     title "Фаза 8 / Фейковый сайт"
     mkdir -p /var/www/html
-    cat > /var/www/html/index.html << 'HTMLEOF'
-<!DOCTYPE html><html lang="en"><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1.0"><title>Welcome</title>
-<style>body{font-family:-apple-system,sans-serif;margin:40px auto;max-width:650px;line-height:1.6;color:#444;padding:0 10px}h1{line-height:1.2}</style>
-</head><body><h1>Welcome to our site</h1><p>This server is running normally.</p><p><small>&copy; 2024-2026</small></p></body></html>
-HTMLEOF
-    wget -qO /tmp/randomfakehtml.sh \
-        "https://raw.githubusercontent.com/mozaroc/x-ui-pro/refs/heads/master/randomfakehtml.sh" 2>/dev/null \
-        && bash /tmp/randomfakehtml.sh 2>/dev/null \
-        && rm -f /tmp/randomfakehtml.sh \
-        || true
-    ok "Фейковый сайт развёрнут"
+
+    # Встроенный генератор рандомных бизнес-сайтов
+    # Без внешних скачиваний, без палёных шаблонов
+    local THEMES=(
+        "Web Development Studio|We build modern web applications|Web Development,Cloud Solutions,API Integration,DevOps Consulting"
+        "Digital Marketing Agency|Data-driven marketing for growing brands|SEO Optimization,Content Strategy,PPC Management,Social Media"
+        "Cloud Infrastructure|Enterprise-grade cloud hosting solutions|Managed Hosting,Auto Scaling,24/7 Monitoring,CDN Services"
+        "Design Bureau|Creative solutions for digital products|UI/UX Design,Brand Identity,Motion Graphics,Print Design"
+        "IT Consulting|Technology solutions for modern business|Infrastructure Audit,Security Assessment,Migration Planning,Team Training"
+        "Software Solutions|Custom software for complex problems|Enterprise Apps,Mobile Development,Data Analytics,System Integration"
+        "Network Services|Reliable connectivity for your business|Network Design,VoIP Solutions,Fiber Optics,Managed WiFi"
+        "Data Analytics|Turn your data into actionable insights|Business Intelligence,Data Warehousing,ML Models,Dashboards"
+    )
+
+    local COLORS=(
+        "#2563eb|#1e40af|#eff6ff"
+        "#059669|#047857|#ecfdf5"
+        "#7c3aed|#6d28d9|#f5f3ff"
+        "#dc2626|#b91c1c|#fef2f2"
+        "#0891b2|#0e7490|#ecfeff"
+        "#d97706|#b45309|#fffbeb"
+        "#4f46e5|#4338ca|#eef2ff"
+        "#0d9488|#0f766e|#f0fdfa"
+    )
+
+    local IDX=$((RANDOM % ${#THEMES[@]}))
+    local CIDX=$((RANDOM % ${#COLORS[@]}))
+
+    IFS='|' read -r BIZ_NAME BIZ_DESC BIZ_SERVICES <<< "${THEMES[$IDX]}"
+    IFS='|' read -r COLOR1 COLOR2 BG_COLOR <<< "${COLORS[$CIDX]}"
+
+    # Извлекаем красивое имя из домена
+    local SITE_NAME
+    SITE_NAME=$(echo "$DOMAIN" | sed 's/\.[^.]*$//' | sed 's/[-_]/ /g' | awk '{for(i=1;i<=NF;i++) $i=toupper(substr($i,1,1)) tolower(substr($i,2))}1')
+
+    local YEAR
+    YEAR=$(date +%Y)
+
+    cat > /var/www/html/index.html << SITEEOF
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>${SITE_NAME} — ${BIZ_NAME}</title>
+    <style>
+        * { margin: 0; padding: 0; box-sizing: border-box; }
+        body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; color: #1f2937; background: #fff; }
+        .hero { background: linear-gradient(135deg, ${COLOR1}, ${COLOR2}); color: #fff; padding: 80px 20px; text-align: center; }
+        .hero h1 { font-size: 2.5rem; font-weight: 700; margin-bottom: 1rem; }
+        .hero p { font-size: 1.2rem; opacity: 0.9; max-width: 600px; margin: 0 auto; }
+        .container { max-width: 960px; margin: 0 auto; padding: 60px 20px; }
+        .services { display: grid; grid-template-columns: repeat(auto-fit, minmax(200px, 1fr)); gap: 24px; margin-top: 40px; }
+        .card { background: ${BG_COLOR}; border-radius: 12px; padding: 24px; text-align: center; }
+        .card h3 { color: ${COLOR1}; margin-bottom: 8px; font-size: 1.1rem; }
+        .card p { color: #6b7280; font-size: 0.9rem; line-height: 1.5; }
+        .about { margin-top: 60px; line-height: 1.8; color: #4b5563; }
+        footer { text-align: center; padding: 40px 20px; color: #9ca3af; font-size: 0.85rem; border-top: 1px solid #f3f4f6; margin-top: 60px; }
+        a { color: ${COLOR1}; }
+    </style>
+</head>
+<body>
+    <div class="hero">
+        <h1>${SITE_NAME}</h1>
+        <p>${BIZ_DESC}</p>
+    </div>
+    <div class="container">
+        <h2 style="text-align:center;font-size:1.8rem;">Our Services</h2>
+        <div class="services">
+SITEEOF
+
+    # Генерируем карточки из списка услуг
+    IFS=',' read -ra SVCS <<< "$BIZ_SERVICES"
+    for svc in "${SVCS[@]}"; do
+        cat >> /var/www/html/index.html << CARDEOF
+            <div class="card">
+                <h3>${svc}</h3>
+                <p>Professional ${svc,,} services tailored to your business needs and goals.</p>
+            </div>
+CARDEOF
+    done
+
+    cat >> /var/www/html/index.html << FOOTEOF
+        </div>
+        <div class="about">
+            <h2 style="margin-bottom:16px;">About Us</h2>
+            <p>${SITE_NAME} is a team of experienced professionals delivering ${BIZ_NAME,,} services since 2019. We work with clients across Europe, helping them achieve their technology goals with modern, scalable solutions.</p>
+            <p style="margin-top:12px;">Based in Europe. Available worldwide. <a href="mailto:info@${DOMAIN}">Get in touch</a>.</p>
+        </div>
+    </div>
+    <footer>
+        &copy; 2019-${YEAR} ${SITE_NAME}. All rights reserved. | <a href="mailto:info@${DOMAIN}">info@${DOMAIN}</a>
+    </footer>
+</body>
+</html>
+FOOTEOF
+
+    ok "Фейковый сайт: ${SITE_NAME} — ${BIZ_NAME}"
 }
 
 phase9_keygen() {
