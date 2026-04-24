@@ -91,7 +91,7 @@ phase1_input() {
     echo ""
 
     ask "Домен для этой ноды"
-    read -r DOMAIN
+    read -r DOMAIN </dev/tty
     [[ -z "$DOMAIN" ]] && die "Домен не может быть пустым"
 
     # Проверяем DNS
@@ -104,12 +104,12 @@ phase1_input() {
         warn "DNS: $DOMAIN → $RESOLVED_IP, но IP сервера = $SERVER_IP"
         warn "Если домен только что создан — DNS может ещё не обновиться"
         ask "Продолжить? (y/n)"
-        read -r CONT
+        read -r CONT </dev/tty
         [[ "$CONT" != "y" ]] && die "Прервано. Подожди DNS-делегирование и запусти заново"
     else
         warn "Не удалось резолвнуть $DOMAIN — проверь DNS A-запись"
         ask "Продолжить? (y/n)"
-        read -r CONT
+        read -r CONT </dev/tty
         [[ "$CONT" != "y" ]] && die "Прервано"
     fi
 
@@ -119,7 +119,7 @@ phase1_input() {
     info "На маке: cat ~/.ssh/id_ed25519.pub"
     echo ""
     ask "Вставь публичный SSH-ключ"
-    read -r SSH_PUB_KEY
+    read -r SSH_PUB_KEY </dev/tty
     [[ -z "$SSH_PUB_KEY" ]] && die "SSH-ключ не может быть пустым"
     [[ "$SSH_PUB_KEY" != ssh-* ]] && die "Неверный формат SSH-ключа (должен начинаться с ssh-)"
     ok "SSH-ключ принят"
@@ -127,7 +127,7 @@ phase1_input() {
     # ── Имя ноды ──────────────────────────────────────────────────────────────
     echo ""
     ask "Имя ноды (для тегов, например DE_natty_narwhal)"
-    read -r NODE_NAME
+    read -r NODE_NAME </dev/tty
     [[ -z "$NODE_NAME" ]] && NODE_NAME=$(echo "$DOMAIN" | tr '.-' '_')
     ok "Имя ноды: $NODE_NAME"
 
@@ -139,7 +139,7 @@ phase1_input() {
     info "  SSH-ключ: ${SSH_PUB_KEY:0:40}..."
     echo ""
     ask "Всё верно? (y/n)"
-    read -r CONFIRM
+    read -r CONFIRM </dev/tty
     [[ "$CONFIRM" != "y" ]] && die "Прервано. Запусти заново"
 }
 
@@ -616,7 +616,7 @@ phase10_panel() {
     echo ""
 
     ask "Вставь SECRET_KEY из панели"
-    read -r SECRET_KEY
+    read -r SECRET_KEY </dev/tty
     [[ -z "$SECRET_KEY" ]] && die "SECRET_KEY не может быть пустым"
     ok "SECRET_KEY принят"
 }
@@ -802,7 +802,7 @@ phase16_beszel() {
 
     echo ""
     ask "Установить Beszel agent? (y/n)"
-    read -r INSTALL_BESZEL
+    read -r INSTALL_BESZEL </dev/tty
 
     if [[ "$INSTALL_BESZEL" == "y" ]]; then
         echo ""
@@ -816,10 +816,10 @@ phase16_beszel() {
         echo ""
 
         ask "Вставь Beszel TOKEN"
-        read -r BESZEL_TOKEN
+        read -r BESZEL_TOKEN </dev/tty
 
         ask "Вставь Beszel KEY (ssh-ed25519 ...)"
-        read -r BESZEL_KEY
+        read -r BESZEL_KEY </dev/tty
 
         if [[ -n "$BESZEL_TOKEN" && -n "$BESZEL_KEY" ]]; then
             # Открываем порт для Beszel
