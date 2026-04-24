@@ -33,7 +33,7 @@ die()   { echo -e "${RED}  ✖ $1${NC}"; exit 1; }
 title() { echo -e "\n${BLUE}━━━ $1 ━━━${NC}"; }
 ask()   { echo -ne "${YELLOW}  ▸ $1: ${NC}"; }
 
-SCRIPT_VERSION="3.1"
+SCRIPT_VERSION="3.2"
 LOG_FILE="/var/log/deploy-remnanode.log"
 exec > >(tee -a "$LOG_FILE") 2>&1
 
@@ -451,10 +451,9 @@ phase11_geo() {
 phase12_docker() {
     title "Фаза 12 / remnawave-node"
     cat > /opt/remnanode/.env << ENVEOF
-# remnawave-node v3.1
 SSL_CERT=/etc/letsencrypt/live/${DOMAIN}/fullchain.pem
 SSL_KEY=/etc/letsencrypt/live/${DOMAIN}/privkey.pem
-NODE_SECRET=${SECRET_KEY}
+SECRET_KEY=${SECRET_KEY}
 NODE_PORT=2222
 ENVEOF
     chmod 600 /opt/remnanode/.env
@@ -509,7 +508,9 @@ echo "$(date '+%Y-%m-%d %H:%M:%S') geo updated" >> "$LOG"
 GEOEOF
     chmod +x /opt/remnanode/update-geo.sh
     CRON_LINE="0 3 * * * /opt/remnanode/update-geo.sh"
-    (crontab -l 2>/dev/null || true) | grep -v "update-geo" | { cat; echo "$CRON_LINE"; } | crontab -
+    EXISTING_CRON=$(crontab -l 2>/dev/null || true)
+    FILTERED_CRON=$(echo "$EXISTING_CRON" | grep -v "update-geo" || true)
+    printf '%s\n%s\n' "$FILTERED_CRON" "$CRON_LINE" | crontab -
     ok "Cron: автообновление geo в 03:00"
     cat > /etc/apt/apt.conf.d/50unattended-upgrades << 'UUEOF'
 Unattended-Upgrade::Allowed-Origins {
@@ -532,7 +533,9 @@ fi
 WDEOF
     chmod +x /opt/remnanode/watchdog.sh
     CRON_WD="*/5 * * * * /opt/remnanode/watchdog.sh"
-    (crontab -l 2>/dev/null || true) | grep -v "watchdog" | { cat; echo "$CRON_WD"; } | crontab -
+    EXISTING_CRON=$(crontab -l 2>/dev/null || true)
+    FILTERED_CRON=$(echo "$EXISTING_CRON" | grep -v "watchdog" || true)
+    printf '%s\n%s\n' "$FILTERED_CRON" "$CRON_WD" | crontab -
     ok "Watchdog: проверка каждые 5 минут"
 }
 
