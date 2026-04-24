@@ -59,7 +59,7 @@ exec > >(tee -a "$LOG_FILE") 2>&1
 phase0_checks() {
     title "Фаза 0 / Проверки"
 
-    [[ $EUID -ne 0 ]] && die "Запусти от root: sudo bash $0"
+    [[ $EUID -ne 0 ]] && die "Запусти от root: sudo bash $0" || true
     ok "root"
 
     source /etc/os-release 2>/dev/null || die "Не могу прочитать /etc/os-release"
@@ -92,7 +92,7 @@ phase1_input() {
 
     ask "Домен для этой ноды"
     read -r DOMAIN </dev/tty
-    [[ -z "$DOMAIN" ]] && die "Домен не может быть пустым"
+    [[ -z "$DOMAIN" ]] && die "Домен не может быть пустым" || true
 
     # Проверяем DNS
     RESOLVED_IP=$(dig +short "$DOMAIN" A 2>/dev/null | head -1)
@@ -105,12 +105,12 @@ phase1_input() {
         warn "Если домен только что создан — DNS может ещё не обновиться"
         ask "Продолжить? (y/n)"
         read -r CONT </dev/tty
-        [[ "$CONT" != "y" ]] && die "Прервано. Подожди DNS-делегирование и запусти заново"
+        [[ "$CONT" != "y" ]] && die "Прервано. Подожди DNS-делегирование и запусти заново" || true
     else
         warn "Не удалось резолвнуть $DOMAIN — проверь DNS A-запись"
         ask "Продолжить? (y/n)"
         read -r CONT </dev/tty
-        [[ "$CONT" != "y" ]] && die "Прервано"
+        [[ "$CONT" != "y" ]] && die "Прервано" || true
     fi
 
     # ── SSH-ключ ──────────────────────────────────────────────────────────────
@@ -120,8 +120,8 @@ phase1_input() {
     echo ""
     ask "Вставь публичный SSH-ключ"
     read -r SSH_PUB_KEY </dev/tty
-    [[ -z "$SSH_PUB_KEY" ]] && die "SSH-ключ не может быть пустым"
-    [[ "$SSH_PUB_KEY" != ssh-* ]] && die "Неверный формат SSH-ключа (должен начинаться с ssh-)"
+    [[ -z "$SSH_PUB_KEY" ]] && die "SSH-ключ не может быть пустым" || true
+    [[ "$SSH_PUB_KEY" != ssh-* ]] && die "Неверный формат SSH-ключа (должен начинаться с ssh-)" || true
     ok "SSH-ключ принят"
 
     # ── Имя ноды ──────────────────────────────────────────────────────────────
@@ -140,7 +140,7 @@ phase1_input() {
     echo ""
     ask "Всё верно? (y/n)"
     read -r CONFIRM </dev/tty
-    [[ "$CONFIRM" != "y" ]] && die "Прервано. Запусти заново"
+    [[ "$CONFIRM" != "y" ]] && die "Прервано. Запусти заново" || true
 }
 
 # =============================================================================
@@ -454,7 +454,7 @@ phase9_keygen() {
     PRIVATE_KEY=$(echo "$KEY_OUTPUT" | grep -i "private" | awk '{print $NF}')
     PUBLIC_KEY=$(echo "$KEY_OUTPUT" | grep -i "public" | awk '{print $NF}')
 
-    [[ -z "$PRIVATE_KEY" || -z "$PUBLIC_KEY" ]] && die "Не удалось извлечь ключи"
+    [[ -z "$PRIVATE_KEY" || -z "$PUBLIC_KEY" ]] && die "Не удалось извлечь ключи" || true
 
     # Сохраняем ключи
     cat > /opt/remnanode/keys.txt << KEYSEOF
@@ -617,7 +617,7 @@ phase10_panel() {
 
     ask "Вставь SECRET_KEY из панели"
     read -r SECRET_KEY </dev/tty
-    [[ -z "$SECRET_KEY" ]] && die "SECRET_KEY не может быть пустым"
+    [[ -z "$SECRET_KEY" ]] && die "SECRET_KEY не может быть пустым" || true
     ok "SECRET_KEY принят"
 }
 
