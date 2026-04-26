@@ -33,7 +33,7 @@ die()   { echo -e "${RED}  ✖ $1${NC}"; exit 1; }
 title() { echo -e "\n${BLUE}━━━ $1 ━━━${NC}"; }
 ask()   { echo -ne "${YELLOW}  ▸ $1: ${NC}"; }
 
-SCRIPT_VERSION="3.2"
+SCRIPT_VERSION="3.3"
 LOG_FILE="/var/log/deploy-remnanode.log"
 exec > >(tee -a "$LOG_FILE") 2>&1
 
@@ -650,13 +650,11 @@ phase16_beszel() {
         info "Beszel hub: http://23.88.3.239:51068"
         info "  1. Зайди в Beszel UI → Systems → Add System"
         info "  2. Name: ${NODE_NAME} | Host: ${SERVER_IP} | Port: 45876"
-        info "  3. Скопируй Token и Key"
+        info "  3. Скопируй Key из Beszel"
         echo ""
-        ask "Вставь Beszel TOKEN"
-        read -r BESZEL_TOKEN </dev/tty
         ask "Вставь Beszel KEY (ssh-ed25519 ...)"
         read -r BESZEL_KEY </dev/tty
-        if [[ -n "$BESZEL_TOKEN" && -n "$BESZEL_KEY" ]]; then
+        if [[ -n "$BESZEL_KEY" ]]; then
             ufw allow 45876/tcp comment "Beszel agent"
             docker stop beszel-agent 2>/dev/null || true
             docker rm beszel-agent 2>/dev/null || true
@@ -665,17 +663,20 @@ phase16_beszel() {
                 --name beszel-agent \
                 --restart unless-stopped \
                 --network host \
-                -e LISTEN=:45876 \
-                -e KEY="$BESZEL_KEY" \
                 -v /var/run/docker.sock:/var/run/docker.sock:ro \
+                -v beszel_agent_data:/var/lib/beszel-agent \
+                -e KEY="$BESZEL_KEY" \
+                -e LISTEN=:45876 \
                 henrygd/beszel-agent:latest
+            sleep 3
             if docker ps | grep -q beszel-agent; then
                 ok "Beszel agent запущен на порту 45876"
+                info "Проверь в Beszel UI что нода стала зелёной и есть fingerprint"
             else
                 warn "Beszel agent не запустился. Проверь: docker logs beszel-agent"
             fi
         else
-            warn "Token или Key не указаны, пропускаю"
+            warn "Key не указан, пропускаю"
         fi
     else
         info "Beszel пропущен. Можно установить позже"
