@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # =============================================================================
-# deploy-remnanode.sh v3.5
-# VLESS + Reality + (TCP/Vision | XHTTP) + steal_oneself
+# deploy-remnanode.sh v3.6
+# VLESS + Reality + (TCP/Vision | XHTTP | BOTH) + steal_oneself
 #
 # Разворачивает remnawave-node на чистом Ubuntu 24.04.
 # Один домен на ноду. Xray на 443 напрямую. nginx — только fallback.
@@ -10,23 +10,17 @@
 #   wget -O deploy.sh https://raw.githubusercontent.com/anfixit/routerus/main/deploy-remnanode.sh
 #   bash deploy.sh
 #
+# Changelog v3.6:
+#   - NEW: транспорт both — tcp:443 + xhttp:<port> в одном профиле,
+#     общий privateKey. Подписка отдаёт обе ссылки; podkop берёт tcp.
+#   - NEW: порт xhttp спрашивается для both, UFW открывает его сам
+#   - FIX: подсказка Flow — панель добавляет flow автоматически (не поле)
 # Changelog v3.5 (аудит безопасности):
-#   - SEC: лог создаётся с umask 077 + chmod 600 (был мир-читаемым)
-#   - SEC: приватный ключ Reality печатается только на /dev/tty, не в лог
-#   - SEC: Beszel hub URL спрашивается, а не захардкожен
-#   - FIX: DNS-проверка через getent (dig в phase1 ещё не установлен)
-#   - FIX: принимаются ключи ssh-/ecdsa-/sk-
-#   - FIX: fail2ban через backend=systemd (journald без auth.log)
-#   - FIX: бэкап daemon.json / certbot cli.ini перед перезаписью
-#   - FIX: проверка интернета через HTTPS, а не ICMP-ping
-#   - FIX: убран хрупкий sed по nginx.conf
-#   - FIX: routing без спорных geosite-категорий (только явные домены)
-#   - FIX: shortIds генерируются, а не берутся из примеров доков
-#   - FIX: убран IFS=$'\n\t'; trap ERR для диагностики
+#   - SEC: лог 600, приватный ключ не в лог, Beszel hub не захардкожен
+#   - FIX: getent вместо dig, ключи ssh-/ecdsa-/sk-, fail2ban systemd,
+#          бэкапы конфигов, HTTPS-проверка сети, shortIds генерируются
 # Changelog v3.4:
 #   - NEW: выбор транспорта tcp/xhttp (по умолчанию tcp + flow vision)
-# Changelog v3.1:
-#   - FIX: NODE_PORT=2222 в .env, geo до docker up, read из /dev/tty
 # =============================================================================
 
 set -euo pipefail
@@ -44,8 +38,9 @@ ask()   { echo -ne "${YELLOW}  ▸ $1: ${NC}"; }
 # Печать секрета только на терминал, минуя tee-лог.
 secret() { echo -e "${GREEN}  $1${NC}" >/dev/tty; }
 
-SCRIPT_VERSION="3.5"
+SCRIPT_VERSION="3.6"
 LOG_FILE="/var/log/deploy-remnanode.log"
+XHTTP_PORT=8444
 
 # Лог не должен быть мир-читаемым (в него попадает stdout всего скрипта).
 umask 077
@@ -157,18 +152,35 @@ phase1_input() {
 
     echo ""
     info "Транспорт VLESS + Reality:"
-    info "  tcp   — RAW + xtls-rprx-vision. Полная совместимость со всеми"
-    info "          клиентами (Happ, v2rayNG, podkop/Nikki на mihomo)."
-    info "          Рекомендуется по умолчанию."
+    info "  tcp   — RAW + xtls-rprx-vision. Совместим со всеми клиентами"
+    info "          (Happ, v2rayNG, podkop/Nikki на mihomo). По умолчанию."
     info "  xhttp — маскировка под HTTP. Обходит блокировку VLESS TCP,"
-    info "          но с частью клиентов (в т.ч. mihomo) менее стабилен."
-    ask "Транспорт (tcp/xhttp) [tcp]"
+    info "          но с частью клиентов (mihomo) менее стабилен."
+    info "  both  — оба inbound на одной ноде: tcp:443 (для podkop) +"
+    info "          xhttp:<port>. Подписка отдаёт обе ссылки."
+    ask "Транспорт (tcp/xhttp/both) [tcp]"
     read -r TRANSPORT </dev/tty
     TRANSPORT="${TRANSPORT:-tcp}"
-    if [[ "$TRANSPORT" != "tcp" && "$TRANSPORT" != "xhttp" ]]; then
-        die "Транспорт должен быть tcp или xhttp"
-    fi
+    case "$TRANSPORT" in
+        tcp|xhttp|both) : ;;
+        *) die "Транспорт должен быть tcp, xhttp или both" ;;
+    esac
     ok "Транспорт: $TRANSPORT"
+
+    if [[ "$TRANSPORT" == "both" ]]; then
+        echo ""
+        info "tcp занимает 443, для xhttp нужен отдельный порт."
+        info "Менее подозрительно выглядят 2053, 2083, 2096, 8443→8444."
+        ask "Порт для xhttp-inbound [8444]"
+        read -r _p </dev/tty
+        [[ -n "$_p" ]] && XHTTP_PORT="$_p"
+        if ! [[ "$XHTTP_PORT" =~ ^[0-9]+$ ]] \
+            || (( XHTTP_PORT < 1 || XHTTP_PORT > 65535 )) \
+            || (( XHTTP_PORT == 443 )); then
+            die "Некорректный порт xhttp (1-65535, не 443)"
+        fi
+        ok "xhttp-порт: $XHTTP_PORT"
+    fi
 
     echo ""
     info "Параметры:"
@@ -176,6 +188,7 @@ phase1_input() {
     info "  IP:        $SERVER_IP"
     info "  Нода:      $NODE_NAME"
     info "  Транспорт: $TRANSPORT"
+    [[ "$TRANSPORT" == "both" ]] && info "  xhttp-порт: $XHTTP_PORT"
     info "  SSH-ключ:  ${SSH_PUB_KEY:0:40}..."
     echo ""
     ask "Всё верно? (y/n)"
@@ -373,8 +386,6 @@ RDEOF
     ln -sf "/etc/nginx/sites-available/${DOMAIN}.conf" \
         /etc/nginx/sites-enabled/
     ln -sf /etc/nginx/sites-available/redirect.conf /etc/nginx/sites-enabled/
-    # Отключаем возможный stream-роутинг от прежних версий, не трогая
-    # nginx.conf хрупким sed.
     rm -f /etc/nginx/stream-enabled/*.conf 2>/dev/null || true
     nginx -t || die "nginx конфиг невалиден"
     systemctl enable nginx
@@ -386,8 +397,6 @@ phase8_fakesite() {
     title "Фаза 8 / Фейковый сайт"
     mkdir -p /var/www/html
 
-    # Встроенный генератор рандомных бизнес-сайтов
-    # Без внешних скачиваний, без палёных шаблонов
     local THEMES=(
         "Web Development Studio|We build modern web applications|Web Development,Cloud Solutions,API Integration,DevOps Consulting"
         "Digital Marketing Agency|Data-driven marketing for growing brands|SEO Optimization,Content Strategy,PPC Management,Social Media"
@@ -398,7 +407,6 @@ phase8_fakesite() {
         "Network Services|Reliable connectivity for your business|Network Design,VoIP Solutions,Fiber Optics,Managed WiFi"
         "Data Analytics|Turn your data into actionable insights|Business Intelligence,Data Warehousing,ML Models,Dashboards"
     )
-
     local COLORS=(
         "#2563eb|#1e40af|#eff6ff"
         "#059669|#047857|#ecfdf5"
@@ -409,18 +417,14 @@ phase8_fakesite() {
         "#4f46e5|#4338ca|#eef2ff"
         "#0d9488|#0f766e|#f0fdfa"
     )
-
     local IDX=$((RANDOM % ${#THEMES[@]}))
     local CIDX=$((RANDOM % ${#COLORS[@]}))
-
     IFS='|' read -r BIZ_NAME BIZ_DESC BIZ_SERVICES <<< "${THEMES[$IDX]}"
     IFS='|' read -r COLOR1 COLOR2 BG_COLOR <<< "${COLORS[$CIDX]}"
 
-    # Извлекаем красивое имя из домена
     local SITE_NAME
     SITE_NAME=$(echo "$DOMAIN" | sed 's/\.[^.]*$//' | sed 's/[-_]/ /g' \
         | awk '{for(i=1;i<=NF;i++) $i=toupper(substr($i,1,1)) tolower(substr($i,2))}1')
-
     local YEAR
     YEAR=$(date +%Y)
 
@@ -457,7 +461,6 @@ phase8_fakesite() {
         <div class="services">
 SITEEOF
 
-    # Генерируем карточки из списка услуг
     IFS=',' read -ra SVCS <<< "$BIZ_SERVICES"
     for svc in "${SVCS[@]}"; do
         cat >> /var/www/html/index.html << CARDEOF
@@ -486,6 +489,48 @@ FOOTEOF
     ok "Фейковый сайт: ${SITE_NAME} — ${BIZ_NAME}"
 }
 
+# Печатает JSON одного inbound: $1=tag $2=port $3=network(tcp|xhttp).
+build_inbound() {
+    local tag="$1" port="$2" net="$3" net_block
+    if [[ "$net" == "xhttp" ]]; then
+        net_block='"network": "xhttp",
+        "xhttpSettings": {
+          "mode": "auto",
+          "path": "/xhp",
+          "extra": {
+            "noSSEHeader": true,
+            "xPaddingBytes": "100-1000",
+            "scMaxBufferedPosts": 30,
+            "scMaxEachPostBytes": 1000000,
+            "scStreamUpServerSecs": "20-80"
+          }
+        },'
+    else
+        net_block='"network": "tcp",'
+    fi
+    cat << INBEOF
+    {
+      "tag": "${tag}",
+      "port": ${port},
+      "protocol": "vless",
+      "settings": { "clients": [], "decryption": "none" },
+      "sniffing": { "enabled": true, "destOverride": ["http","tls","quic"] },
+      "streamSettings": {
+        ${net_block}
+        "security": "reality",
+        "realitySettings": {
+          "dest": "127.0.0.1:8443",
+          "show": false,
+          "xver": 1,
+          "shortIds": ["","${SID1}","${SID2}","${SID3}"],
+          "privateKey": "${PRIVATE_KEY}",
+          "serverNames": ["${DOMAIN}"]
+        }
+      }
+    }
+INBEOF
+}
+
 phase9_keygen() {
     title "Фаза 9 / x25519 ключи + Config Profile"
     mkdir -p /opt/remnanode
@@ -506,34 +551,27 @@ PUBLIC_KEY=$PUBLIC_KEY
 KEYSEOF
     chmod 600 /opt/remnanode/keys.txt
     ok "Ключи сгенерированы (сохранены в /opt/remnanode/keys.txt, chmod 600)"
-    # Приватный ключ — только на терминал, НЕ в лог-файл.
     secret "Private Key: $PRIVATE_KEY"
     secret "Public Key:  $PUBLIC_KEY"
 
-    # shortIds генерируем случайно (пустой + 3 разной длины).
-    local SID1 SID2 SID3
+    # shortIds: пустой + 3 случайных разной длины. Общие для обоих inbound.
     SID1=$(openssl rand -hex 1)
     SID2=$(openssl rand -hex 4)
     SID3=$(openssl rand -hex 8)
 
-    # streamSettings зависит от выбранного транспорта.
-    local STREAM_NETWORK
-    if [[ "$TRANSPORT" == "xhttp" ]]; then
-        STREAM_NETWORK='"network": "xhttp",
-      "xhttpSettings": {
-        "mode": "auto",
-        "path": "/xhp",
-        "extra": {
-          "noSSEHeader": true,
-          "xPaddingBytes": "100-1000",
-          "scMaxBufferedPosts": 30,
-          "scMaxEachPostBytes": 1000000,
-          "scStreamUpServerSecs": "20-80"
-        }
-      },'
-    else
-        STREAM_NETWORK='"network": "tcp",'
-    fi
+    local INBOUNDS
+    case "$TRANSPORT" in
+        both)
+            INBOUNDS="$(build_inbound "${NODE_NAME}_tcp" 443 tcp),
+$(build_inbound "${NODE_NAME}_xhttp" "$XHTTP_PORT" xhttp)"
+            ;;
+        xhttp)
+            INBOUNDS="$(build_inbound "${NODE_NAME}_xhttp" 443 xhttp)"
+            ;;
+        *)
+            INBOUNDS="$(build_inbound "${NODE_NAME}_tcp" 443 tcp)"
+            ;;
+    esac
 
     echo ""
     echo -e "${CYAN}╔══════════════════════════════════════════════════════════════╗${NC}"
@@ -545,25 +583,9 @@ KEYSEOF
 {
   "log": { "loglevel": "warning" },
   "dns": { "servers": [{"address":"https://94.140.14.14/dns-query","domains":[],"skipFallback":false},"localhost"] },
-  "inbounds": [{
-    "tag": "${NODE_NAME}_${TRANSPORT}",
-    "port": 443,
-    "protocol": "vless",
-    "settings": { "clients": [], "decryption": "none" },
-    "sniffing": { "enabled": true, "destOverride": ["http","tls","quic"] },
-    "streamSettings": {
-      ${STREAM_NETWORK}
-      "security": "reality",
-      "realitySettings": {
-        "dest": "127.0.0.1:8443",
-        "show": false,
-        "xver": 1,
-        "shortIds": ["","${SID1}","${SID2}","${SID3}"],
-        "privateKey": "${PRIVATE_KEY}",
-        "serverNames": ["${DOMAIN}"]
-      }
-    }
-  }],
+  "inbounds": [
+${INBOUNDS}
+  ],
   "outbounds": [
     {"tag":"DIRECT","protocol":"freedom"},
     {"tag":"BLOCK","protocol":"blackhole"}
@@ -587,28 +609,12 @@ JSONEOF
 
 phase10_panel() {
     title "Фаза 10 / Настройка в панели Remnawave"
-
-    local FLOW_HINT ALPN_HINT
-    if [[ "$TRANSPORT" == "tcp" ]]; then
-        FLOW_HINT="xtls-rprx-vision"
-        ALPN_HINT="(не задавать / по умолчанию)"
-    else
-        FLOW_HINT="(не задавать — XHTTP flow не использует)"
-        ALPN_HINT="h2"
-    fi
-
     echo ""
     echo -e "${YELLOW}╔══════════════════════════════════════════════════════════════╗${NC}"
-    echo -e "${YELLOW}║  СЕЙЧАС ПЕРЕКЛЮЧИСЬ В ПАНЕЛЬ REMNAWAVE И СДЕЛАЙ:           ║${NC}"
-    echo -e "${YELLOW}╠══════════════════════════════════════════════════════════════╣${NC}"
-    echo -e "${YELLOW}║  1. Config Profiles → Create${NC}"
-    echo -e "${YELLOW}║     Имя: ${NODE_NAME}_${TRANSPORT}${NC}"
-    echo -e "${YELLOW}║     Вставь JSON из фазы 9 (выше)${NC}"
+    echo -e "${YELLOW}║  1. Config Profiles → Create — вставь JSON из фазы 9${NC}"
     echo -e "${YELLOW}║  2. Nodes → Create${NC}"
-    echo -e "${YELLOW}║     Name: ${NODE_NAME}${NC}"
-    echo -e "${YELLOW}║     Address: ${SERVER_IP}${NC}"
-    echo -e "${YELLOW}║     Port: 2222${NC}"
-    echo -e "${YELLOW}║     Привязать Config Profile: ${NODE_NAME}_${TRANSPORT}${NC}"
+    echo -e "${YELLOW}║     Name: ${NODE_NAME} | Address: ${SERVER_IP} | Port: 2222${NC}"
+    echo -e "${YELLOW}║     Привязать профиль, включить все inbound профиля${NC}"
     echo -e "${YELLOW}║     → Скопируй SECRET_KEY после создания!${NC}"
     echo -e "${YELLOW}╚══════════════════════════════════════════════════════════════╝${NC}"
     echo ""
@@ -619,22 +625,32 @@ phase10_panel() {
 
     echo ""
     echo -e "${YELLOW}╔══════════════════════════════════════════════════════════════╗${NC}"
-    echo -e "${YELLOW}║  3. Hosts → Create${NC}"
-    echo -e "${YELLOW}║     Inbound tag: ${NODE_NAME}_${TRANSPORT}${NC}"
-    echo -e "${YELLOW}║     Address:     ${DOMAIN}${NC}"
-    echo -e "${YELLOW}║     Port:        443${NC}"
-    echo -e "${YELLOW}║     SNI:         ${DOMAIN}   (steal_oneself!)${NC}"
-    echo -e "${YELLOW}║     Fingerprint: chrome${NC}"
-    echo -e "${YELLOW}║     Flow:        ${FLOW_HINT}${NC}"
-    echo -e "${YELLOW}║     ALPN:        ${ALPN_HINT}${NC}"
-    echo -e "${YELLOW}║  4. Internal Squads → Default-Squad${NC}"
-    echo -e "${YELLOW}║     → Добавь inbound ${NODE_NAME}_${TRANSPORT}${NC}"
-    echo -e "${YELLOW}║     ⚠ БЕЗ ЭТОГО НОДА НЕ ПОПАДЁТ В ПОДПИСКУ!${NC}"
-    echo -e "${YELLOW}║  5. Nodes → нода зелёная? Happ → обнови → пинг?${NC}"
+    echo -e "${YELLOW}║  3. Hosts → Create (Fingerprint: chrome, SNI = домен)${NC}"
+    echo -e "${YELLOW}║     Flow НЕ задавать — панель добавит его сама для tcp${NC}"
+
+    if [[ "$TRANSPORT" == "tcp" || "$TRANSPORT" == "both" ]]; then
+        echo -e "${YELLOW}║   • Host TCP:${NC}"
+        echo -e "${YELLOW}║     inbound ${NODE_NAME}_tcp | Address ${DOMAIN} | Port 443${NC}"
+        echo -e "${YELLOW}║     ALPN: не задавать (flow vision добавится автоматически)${NC}"
+    fi
+    if [[ "$TRANSPORT" == "xhttp" ]]; then
+        echo -e "${YELLOW}║   • Host XHTTP:${NC}"
+        echo -e "${YELLOW}║     inbound ${NODE_NAME}_xhttp | Address ${DOMAIN} | Port 443${NC}"
+        echo -e "${YELLOW}║     ALPN: h2${NC}"
+    fi
+    if [[ "$TRANSPORT" == "both" ]]; then
+        echo -e "${YELLOW}║   • Host XHTTP:${NC}"
+        echo -e "${YELLOW}║     inbound ${NODE_NAME}_xhttp | Address ${DOMAIN} | Port ${XHTTP_PORT}${NC}"
+        echo -e "${YELLOW}║     ALPN: h2${NC}"
+    fi
+
+    echo -e "${YELLOW}║  4. Internal Squads → Default-Squad → добавь ВСЕ inbound${NC}"
+    echo -e "${YELLOW}║     ⚠ Без этого нода не попадёт в подписку!${NC}"
+    echo -e "${YELLOW}║  5. Nodes → нода зелёная? Клиент → обнови → пинг?${NC}"
     echo -e "${YELLOW}╚══════════════════════════════════════════════════════════════╝${NC}"
     echo ""
-    info "Ключи: /opt/remnanode/keys.txt"
-    info "Лог:   $LOG_FILE"
+    info "Проверь в готовой ссылке подписки: для tcp есть &flow=xtls-rprx-vision"
+    info "Ключи: /opt/remnanode/keys.txt | Лог: $LOG_FILE"
     echo ""
 }
 
@@ -759,10 +775,14 @@ phase15_ufw() {
     ufw default deny incoming
     ufw default allow outgoing
     ufw allow 2810/tcp comment "SSH"
-    ufw allow 443/tcp  comment "Xray Reality ${TRANSPORT}"
+    ufw allow 443/tcp  comment "Xray Reality"
     ufw allow 80/tcp   comment "HTTP redirect + certbot"
     ufw allow 8443/tcp comment "nginx fallback"
     ufw allow 2222/tcp comment "Remnawave node API"
+    if [[ "$TRANSPORT" == "both" ]]; then
+        ufw allow "${XHTTP_PORT}/tcp" comment "Xray Reality XHTTP"
+        ok "UFW: +${XHTTP_PORT}(xhttp)"
+    fi
     ufw --force enable
     ok "UFW: 2810(SSH) 443(Xray) 80(HTTP) 8443(nginx) 2222(API)"
 }
@@ -825,9 +845,10 @@ phase17_summary() {
     echo -e "${GREEN}║  IP:          ${SERVER_IP}${NC}"
     echo -e "${GREEN}║  Нода:        ${NODE_NAME}${NC}"
     echo -e "${GREEN}║  Транспорт:   ${TRANSPORT}${NC}"
+    [[ "$TRANSPORT" == "both" ]] && \
+        echo -e "${GREEN}║  Порты:       tcp:443 + xhttp:${XHTTP_PORT}${NC}"
     echo -e "${GREEN}║  SSH:         ssh -p 2810 admin@${SERVER_IP}${NC}"
     echo -e "${GREEN}╚══════════════════════════════════════════════════════════════╝${NC}"
-    # Ключи — только на терминал, не в лог.
     secret "Private Key: ${PRIVATE_KEY}"
     secret "Public Key:  ${PUBLIC_KEY}"
     echo ""
