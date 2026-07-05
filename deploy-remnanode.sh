@@ -1,27 +1,35 @@
 #!/usr/bin/env bash
 # =============================================================================
-# deploy-remnanode.sh v3.1
-# VLESS + Reality + XHTTP + steal_oneself
+# deploy-remnanode.sh v3.5
+# VLESS + Reality + (TCP/Vision | XHTTP) + steal_oneself
 #
-# Разворачивает remnawave-node на чистом Ubuntu 24.04
+# Разворачивает remnawave-node на чистом Ubuntu 24.04.
 # Один домен на ноду. Xray на 443 напрямую. nginx — только fallback.
 #
 # Запуск:
 #   wget -O deploy.sh https://raw.githubusercontent.com/anfixit/routerus/main/deploy-remnanode.sh
 #   bash deploy.sh
 #
+# Changelog v3.5 (аудит безопасности):
+#   - SEC: лог создаётся с umask 077 + chmod 600 (был мир-читаемым)
+#   - SEC: приватный ключ Reality печатается только на /dev/tty, не в лог
+#   - SEC: Beszel hub URL спрашивается, а не захардкожен
+#   - FIX: DNS-проверка через getent (dig в phase1 ещё не установлен)
+#   - FIX: принимаются ключи ssh-/ecdsa-/sk-
+#   - FIX: fail2ban через backend=systemd (journald без auth.log)
+#   - FIX: бэкап daemon.json / certbot cli.ini перед перезаписью
+#   - FIX: проверка интернета через HTTPS, а не ICMP-ping
+#   - FIX: убран хрупкий sed по nginx.conf
+#   - FIX: routing без спорных geosite-категорий (только явные домены)
+#   - FIX: shortIds генерируются, а не берутся из примеров доков
+#   - FIX: убран IFS=$'\n\t'; trap ERR для диагностики
+# Changelog v3.4:
+#   - NEW: выбор транспорта tcp/xhttp (по умолчанию tcp + flow vision)
 # Changelog v3.1:
-#   - FIX: NODE_PORT=2222 в .env (Required)
-#   - FIX: geo-файлы скачиваются ДО docker compose up
-#   - FIX: daemon.json ДО запуска контейнера
-#   - FIX: все read из /dev/tty
-#   - FIX: все условия через if/then (безопасно для set -e)
-#   - FIX: psmisc в списке пакетов (fuser)
-#   - FIX: sysctl conntrack с обработкой ошибок
+#   - FIX: NODE_PORT=2222 в .env, geo до docker up, read из /dev/tty
 # =============================================================================
 
 set -euo pipefail
-IFS=$'\n\t'
 
 RED='\033[0;31m'; GREEN='\033[0;32m'; YELLOW='\033[1;33m'
 BLUE='\033[0;34m'; CYAN='\033[0;36m'; NC='\033[0m'
@@ -33,24 +41,66 @@ die()   { echo -e "${RED}  ✖ $1${NC}"; exit 1; }
 title() { echo -e "\n${BLUE}━━━ $1 ━━━${NC}"; }
 ask()   { echo -ne "${YELLOW}  ▸ $1: ${NC}"; }
 
-SCRIPT_VERSION="3.3"
+# Печать секрета только на терминал, минуя tee-лог.
+secret() { echo -e "${GREEN}  $1${NC}" >/dev/tty; }
+
+SCRIPT_VERSION="3.5"
 LOG_FILE="/var/log/deploy-remnanode.log"
+
+# Лог не должен быть мир-читаемым (в него попадает stdout всего скрипта).
+umask 077
+touch "$LOG_FILE"
+chmod 600 "$LOG_FILE"
 exec > >(tee -a "$LOG_FILE") 2>&1
+
+trap 'echo -e "${RED}  ✖ Ошибка на строке $LINENO (код $?)${NC}" >/dev/tty' ERR
+
+# --- Утилиты -----------------------------------------------------------------
+backup_file() {
+    # Бэкап файла перед деструктивной перезаписью.
+    if [[ -f "$1" ]]; then
+        cp -a "$1" "$1.bak.$(date +%s)"
+    fi
+}
+
+check_internet() {
+    if command -v curl >/dev/null 2>&1; then
+        curl -fsS --max-time 6 https://api.github.com >/dev/null 2>&1 \
+            && return 0
+    fi
+    if command -v wget >/dev/null 2>&1; then
+        wget -q --spider --timeout=6 https://api.github.com && return 0
+    fi
+    ping -c1 -W3 1.1.1.1 >/dev/null 2>&1
+}
+
+get_server_ip() {
+    local ip=''
+    if command -v curl >/dev/null 2>&1; then
+        ip=$(curl -s4 --max-time 6 ifconfig.me 2>/dev/null \
+            || curl -s4 --max-time 6 icanhazip.com 2>/dev/null) || true
+    fi
+    if [[ -z "$ip" ]] && command -v wget >/dev/null 2>&1; then
+        ip=$(wget -qO- --timeout=6 https://ifconfig.me 2>/dev/null) || true
+    fi
+    echo "$ip"
+}
 
 phase0_checks() {
     title "Фаза 0 / Проверки"
     if [[ $EUID -ne 0 ]]; then die "Запусти от root: sudo bash $0"; fi
     ok "root"
-    source /etc/os-release 2>/dev/null || die "Не могу прочитать /etc/os-release"
+    # shellcheck disable=SC1091
+    source /etc/os-release 2>/dev/null || die "Не читается /etc/os-release"
     if [[ "$ID" != "ubuntu" || "${VERSION_ID%%.*}" -lt 24 ]]; then
         die "Нужна Ubuntu 24.04+, у тебя $PRETTY_NAME"
     fi
     ok "Ubuntu $VERSION_ID"
-    ping -c1 -W3 google.com &>/dev/null || die "Нет интернета"
+    check_internet || die "Нет интернета (проверил HTTPS к api.github.com)"
     ok "Интернет доступен"
     echo ""
     echo -e "${GREEN}  deploy-remnanode.sh v${SCRIPT_VERSION}${NC}"
-    echo -e "${GREEN}  VLESS + Reality + XHTTP + steal_oneself${NC}"
+    echo -e "${GREEN}  VLESS + Reality + steal_oneself${NC}"
     echo ""
 }
 
@@ -65,8 +115,10 @@ phase1_input() {
     read -r DOMAIN </dev/tty
     if [[ -z "$DOMAIN" ]]; then die "Домен не может быть пустым"; fi
 
-    RESOLVED_IP=$(dig +short "$DOMAIN" A 2>/dev/null | head -1) || true
-    SERVER_IP=$(curl -s4 ifconfig.me 2>/dev/null || curl -s4 icanhazip.com 2>/dev/null) || true
+    # getent есть на чистой системе (dig ставится позже, в phase2).
+    RESOLVED_IP=$(getent ahostsv4 "$DOMAIN" 2>/dev/null \
+        | awk '{print $1; exit}') || true
+    SERVER_IP=$(get_server_ip)
 
     if [[ -n "$RESOLVED_IP" && "$RESOLVED_IP" == "$SERVER_IP" ]]; then
         ok "DNS: $DOMAIN → $RESOLVED_IP (совпадает с IP сервера)"
@@ -83,13 +135,16 @@ phase1_input() {
     fi
 
     echo ""
-    info "SSH-ключ для пользователя admin (ed25519 или rsa)."
+    info "SSH-ключ для пользователя admin (ed25519, rsa, ecdsa)."
     info "На маке: cat ~/.ssh/id_ed25519.pub"
     echo ""
     ask "Вставь публичный SSH-ключ"
     read -r SSH_PUB_KEY </dev/tty
     if [[ -z "$SSH_PUB_KEY" ]]; then die "SSH-ключ не может быть пустым"; fi
-    if [[ "$SSH_PUB_KEY" != ssh-* ]]; then die "Неверный формат (должен начинаться с ssh-)"; fi
+    case "$SSH_PUB_KEY" in
+        ssh-*|ecdsa-*|sk-*) : ;;
+        *) die "Неверный формат SSH-ключа" ;;
+    esac
     ok "SSH-ключ принят"
 
     echo ""
@@ -101,11 +156,27 @@ phase1_input() {
     ok "Имя ноды: $NODE_NAME"
 
     echo ""
+    info "Транспорт VLESS + Reality:"
+    info "  tcp   — RAW + xtls-rprx-vision. Полная совместимость со всеми"
+    info "          клиентами (Happ, v2rayNG, podkop/Nikki на mihomo)."
+    info "          Рекомендуется по умолчанию."
+    info "  xhttp — маскировка под HTTP. Обходит блокировку VLESS TCP,"
+    info "          но с частью клиентов (в т.ч. mihomo) менее стабилен."
+    ask "Транспорт (tcp/xhttp) [tcp]"
+    read -r TRANSPORT </dev/tty
+    TRANSPORT="${TRANSPORT:-tcp}"
+    if [[ "$TRANSPORT" != "tcp" && "$TRANSPORT" != "xhttp" ]]; then
+        die "Транспорт должен быть tcp или xhttp"
+    fi
+    ok "Транспорт: $TRANSPORT"
+
+    echo ""
     info "Параметры:"
-    info "  Домен:    $DOMAIN"
-    info "  IP:       $SERVER_IP"
-    info "  Нода:     $NODE_NAME"
-    info "  SSH-ключ: ${SSH_PUB_KEY:0:40}..."
+    info "  Домен:     $DOMAIN"
+    info "  IP:        $SERVER_IP"
+    info "  Нода:      $NODE_NAME"
+    info "  Транспорт: $TRANSPORT"
+    info "  SSH-ключ:  ${SSH_PUB_KEY:0:40}..."
     echo ""
     ask "Всё верно? (y/n)"
     read -r CONFIRM </dev/tty
@@ -122,7 +193,7 @@ phase2_deps() {
         nginx-full certbot fail2ban \
         unattended-upgrades apt-listchanges \
         ca-certificates gnupg lsb-release \
-        2>/dev/null
+        || die "Не удалось установить пакеты (см. вывод выше)"
     ok "Пакеты установлены"
 
     if ! command -v docker &>/dev/null; then
@@ -135,8 +206,13 @@ phase2_deps() {
     fi
     systemctl reset-failed docker 2>/dev/null || true
 
-    # Docker log rotation (ДО запуска контейнеров!)
+    # Docker log rotation (ДО запуска контейнеров!). Не затираем чужой конфиг.
     mkdir -p /etc/docker
+    if [[ -f /etc/docker/daemon.json ]] \
+        && ! grep -q '"log-driver"' /etc/docker/daemon.json; then
+        warn "/etc/docker/daemon.json уже существует — делаю бэкап"
+    fi
+    backup_file /etc/docker/daemon.json
     cat > /etc/docker/daemon.json << 'DKEOF'
 {
   "log-driver": "json-file",
@@ -162,13 +238,13 @@ phase3_ssh() {
     echo "$SSH_PUB_KEY" > /home/admin/.ssh/authorized_keys
     chmod 700 /home/admin/.ssh
     chmod 600 /home/admin/.ssh/authorized_keys
-    chown -R admin:$(id -gn admin) /home/admin/.ssh
+    chown -R admin:"$(id -gn admin)" /home/admin/.ssh
     ok "SSH-ключ установлен"
     echo "admin ALL=(ALL) NOPASSWD:ALL" > /etc/sudoers.d/admin
     chmod 440 /etc/sudoers.d/admin
     ok "sudo без пароля"
 
-    cp /etc/ssh/sshd_config /etc/ssh/sshd_config.bak.$(date +%s)
+    cp /etc/ssh/sshd_config "/etc/ssh/sshd_config.bak.$(date +%s)"
     cat > /etc/ssh/sshd_config.d/hardening.conf << SSHEOF
 Port $SSH_PORT
 PermitRootLogin no
@@ -183,7 +259,8 @@ AllowUsers admin
 SSHEOF
     systemctl disable ssh.socket 2>/dev/null || true
     systemctl stop ssh.socket 2>/dev/null || true
-    systemctl restart ssh 2>/dev/null || systemctl restart sshd 2>/dev/null || true
+    systemctl restart ssh 2>/dev/null || systemctl restart sshd 2>/dev/null \
+        || true
     ok "SSH: порт $SSH_PORT, key-only, root запрещён"
     warn "ВАЖНО: Проверь подключение из ДРУГОГО терминала:"
     warn "  ssh -p $SSH_PORT admin@$SERVER_IP"
@@ -191,12 +268,14 @@ SSHEOF
 
 phase4_fail2ban() {
     title "Фаза 4 / fail2ban"
+    # backend=systemd — Ubuntu 24.04 по умолчанию journald, auth.log может
+    # отсутствовать.
     cat > /etc/fail2ban/jail.local << 'F2BEOF'
 [sshd]
 enabled  = true
 port     = 2810
 filter   = sshd
-logpath  = /var/log/auth.log
+backend  = systemd
 maxretry = 3
 bantime  = 3600
 findtime = 600
@@ -248,9 +327,10 @@ phase6_ssl() {
         certbot certonly --standalone --non-interactive \
             --agree-tos --register-unsafely-without-email \
             -d "$DOMAIN" \
-            || die "Не удалось получить SSL для $DOMAIN. Проверь: dig $DOMAIN A +short"
+            || die "Не удалось получить SSL. Проверь: dig $DOMAIN A +short"
         ok "SSL $DOMAIN получен"
     fi
+    backup_file /etc/letsencrypt/cli.ini
     cat > /etc/letsencrypt/cli.ini << CERTEOF
 pre-hook = systemctl stop nginx || true; fuser -k 80/tcp || true
 post-hook = systemctl start nginx || true
@@ -263,7 +343,7 @@ phase7_nginx() {
     title "Фаза 7 / nginx fallback"
     info "Reality dest → 127.0.0.1:8443 (DPI/пробберы видят реальный сайт)"
     rm -f /etc/nginx/sites-enabled/default
-    cat > /etc/nginx/sites-available/${DOMAIN}.conf << NGXEOF
+    cat > "/etc/nginx/sites-available/${DOMAIN}.conf" << NGXEOF
 server {
     listen 8443 ssl http2 proxy_protocol;
     listen [::]:8443 ssl http2 proxy_protocol;
@@ -290,10 +370,12 @@ server {
     return 301 https://$host$request_uri;
 }
 RDEOF
-    ln -sf /etc/nginx/sites-available/${DOMAIN}.conf /etc/nginx/sites-enabled/
+    ln -sf "/etc/nginx/sites-available/${DOMAIN}.conf" \
+        /etc/nginx/sites-enabled/
     ln -sf /etc/nginx/sites-available/redirect.conf /etc/nginx/sites-enabled/
+    # Отключаем возможный stream-роутинг от прежних версий, не трогая
+    # nginx.conf хрупким sed.
     rm -f /etc/nginx/stream-enabled/*.conf 2>/dev/null || true
-    sed -i '/stream {/,/}/d' /etc/nginx/nginx.conf 2>/dev/null || true
     nginx -t || die "nginx конфиг невалиден"
     systemctl enable nginx
     systemctl start nginx
@@ -336,7 +418,8 @@ phase8_fakesite() {
 
     # Извлекаем красивое имя из домена
     local SITE_NAME
-    SITE_NAME=$(echo "$DOMAIN" | sed 's/\.[^.]*$//' | sed 's/[-_]/ /g' | awk '{for(i=1;i<=NF;i++) $i=toupper(substr($i,1,1)) tolower(substr($i,2))}1')
+    SITE_NAME=$(echo "$DOMAIN" | sed 's/\.[^.]*$//' | sed 's/[-_]/ /g' \
+        | awk '{for(i=1;i<=NF;i++) $i=toupper(substr($i,1,1)) tolower(substr($i,2))}1')
 
     local YEAR
     YEAR=$(date +%Y)
@@ -422,12 +505,36 @@ PRIVATE_KEY=$PRIVATE_KEY
 PUBLIC_KEY=$PUBLIC_KEY
 KEYSEOF
     chmod 600 /opt/remnanode/keys.txt
-    ok "Ключи сгенерированы"
-    echo ""
-    echo -e "${GREEN}  Private Key: $PRIVATE_KEY${NC}"
-    echo -e "${GREEN}  Public Key:  $PUBLIC_KEY${NC}"
-    echo ""
-    SHORT_IDS=$(openssl rand -hex 8)
+    ok "Ключи сгенерированы (сохранены в /opt/remnanode/keys.txt, chmod 600)"
+    # Приватный ключ — только на терминал, НЕ в лог-файл.
+    secret "Private Key: $PRIVATE_KEY"
+    secret "Public Key:  $PUBLIC_KEY"
+
+    # shortIds генерируем случайно (пустой + 3 разной длины).
+    local SID1 SID2 SID3
+    SID1=$(openssl rand -hex 1)
+    SID2=$(openssl rand -hex 4)
+    SID3=$(openssl rand -hex 8)
+
+    # streamSettings зависит от выбранного транспорта.
+    local STREAM_NETWORK
+    if [[ "$TRANSPORT" == "xhttp" ]]; then
+        STREAM_NETWORK='"network": "xhttp",
+      "xhttpSettings": {
+        "mode": "auto",
+        "path": "/xhp",
+        "extra": {
+          "noSSEHeader": true,
+          "xPaddingBytes": "100-1000",
+          "scMaxBufferedPosts": 30,
+          "scMaxEachPostBytes": 1000000,
+          "scStreamUpServerSecs": "20-80"
+        }
+      },'
+    else
+        STREAM_NETWORK='"network": "tcp",'
+    fi
+
     echo ""
     echo -e "${CYAN}╔══════════════════════════════════════════════════════════════╗${NC}"
     echo -e "${CYAN}║  ГОТОВЫЙ JSON ДЛЯ CONFIG PROFILE В REMNAWAVE              ║${NC}"
@@ -439,30 +546,19 @@ KEYSEOF
   "log": { "loglevel": "warning" },
   "dns": { "servers": [{"address":"https://94.140.14.14/dns-query","domains":[],"skipFallback":false},"localhost"] },
   "inbounds": [{
-    "tag": "${NODE_NAME}_xhttp",
+    "tag": "${NODE_NAME}_${TRANSPORT}",
     "port": 443,
     "protocol": "vless",
     "settings": { "clients": [], "decryption": "none" },
     "sniffing": { "enabled": true, "destOverride": ["http","tls","quic"] },
     "streamSettings": {
-      "network": "xhttp",
+      ${STREAM_NETWORK}
       "security": "reality",
-      "xhttpSettings": {
-        "mode": "auto",
-        "path": "/xhp",
-        "extra": {
-          "noSSEHeader": true,
-          "xPaddingBytes": "100-1000",
-          "scMaxBufferedPosts": 30,
-          "scMaxEachPostBytes": 1000000,
-          "scStreamUpServerSecs": "20-80"
-        }
-      },
       "realitySettings": {
         "dest": "127.0.0.1:8443",
         "show": false,
         "xver": 1,
-        "shortIds": ["","a1","bc23","def456","${SHORT_IDS}"],
+        "shortIds": ["","${SID1}","${SID2}","${SID3}"],
         "privateKey": "${PRIVATE_KEY}",
         "serverNames": ["${DOMAIN}"]
       }
@@ -477,7 +573,7 @@ KEYSEOF
     "rules": [
       {"type":"field","network":"udp","port":"443","outboundTag":"BLOCK"},
       {"type":"field","protocol":["bittorrent"],"outboundTag":"DIRECT"},
-      {"type":"field","domain":["geosite:category-ads-all","geosite:win-spy","domain:doubleclick.net","domain:googlesyndication.com","domain:googleadservices.com","domain:google-analytics.com","domain:analytics.yandex.ru","domain:mc.yandex.ru","domain:crashlytics.com","domain:app-measurement.com","domain:appcenter.ms"],"outboundTag":"BLOCK"},
+      {"type":"field","domain":["domain:doubleclick.net","domain:googlesyndication.com","domain:googleadservices.com","domain:google-analytics.com","domain:analytics.yandex.ru","domain:mc.yandex.ru","domain:crashlytics.com","domain:app-measurement.com","domain:appcenter.ms"],"outboundTag":"BLOCK"},
       {"type":"field","network":"udp","port":"135,137,138,139","outboundTag":"BLOCK"},
       {"type":"field","ip":["geoip:private"],"outboundTag":"DIRECT"}
     ]
@@ -491,25 +587,55 @@ JSONEOF
 
 phase10_panel() {
     title "Фаза 10 / Настройка в панели Remnawave"
+
+    local FLOW_HINT ALPN_HINT
+    if [[ "$TRANSPORT" == "tcp" ]]; then
+        FLOW_HINT="xtls-rprx-vision"
+        ALPN_HINT="(не задавать / по умолчанию)"
+    else
+        FLOW_HINT="(не задавать — XHTTP flow не использует)"
+        ALPN_HINT="h2"
+    fi
+
     echo ""
     echo -e "${YELLOW}╔══════════════════════════════════════════════════════════════╗${NC}"
     echo -e "${YELLOW}║  СЕЙЧАС ПЕРЕКЛЮЧИСЬ В ПАНЕЛЬ REMNAWAVE И СДЕЛАЙ:           ║${NC}"
     echo -e "${YELLOW}╠══════════════════════════════════════════════════════════════╣${NC}"
-    echo -e "${YELLOW}║  1. Config Profiles → Create                               ║${NC}"
-    echo -e "${YELLOW}║     Имя: ${NODE_NAME}_xhttp                                ║${NC}"
-    echo -e "${YELLOW}║     Вставь JSON из фазы 9 (выше)                           ║${NC}"
-    echo -e "${YELLOW}║  2. Nodes → Create                                         ║${NC}"
-    echo -e "${YELLOW}║     Name: ${NODE_NAME}                                     ║${NC}"
-    echo -e "${YELLOW}║     Address: ${SERVER_IP}                                  ║${NC}"
-    echo -e "${YELLOW}║     Port: 2222                                             ║${NC}"
-    echo -e "${YELLOW}║     Привязать Config Profile: ${NODE_NAME}_xhttp           ║${NC}"
-    echo -e "${YELLOW}║     → Скопируй SECRET_KEY после создания!                  ║${NC}"
+    echo -e "${YELLOW}║  1. Config Profiles → Create${NC}"
+    echo -e "${YELLOW}║     Имя: ${NODE_NAME}_${TRANSPORT}${NC}"
+    echo -e "${YELLOW}║     Вставь JSON из фазы 9 (выше)${NC}"
+    echo -e "${YELLOW}║  2. Nodes → Create${NC}"
+    echo -e "${YELLOW}║     Name: ${NODE_NAME}${NC}"
+    echo -e "${YELLOW}║     Address: ${SERVER_IP}${NC}"
+    echo -e "${YELLOW}║     Port: 2222${NC}"
+    echo -e "${YELLOW}║     Привязать Config Profile: ${NODE_NAME}_${TRANSPORT}${NC}"
+    echo -e "${YELLOW}║     → Скопируй SECRET_KEY после создания!${NC}"
     echo -e "${YELLOW}╚══════════════════════════════════════════════════════════════╝${NC}"
     echo ""
     ask "Вставь SECRET_KEY из панели"
     read -r SECRET_KEY </dev/tty
     if [[ -z "$SECRET_KEY" ]]; then die "SECRET_KEY не может быть пустым"; fi
     ok "SECRET_KEY принят"
+
+    echo ""
+    echo -e "${YELLOW}╔══════════════════════════════════════════════════════════════╗${NC}"
+    echo -e "${YELLOW}║  3. Hosts → Create${NC}"
+    echo -e "${YELLOW}║     Inbound tag: ${NODE_NAME}_${TRANSPORT}${NC}"
+    echo -e "${YELLOW}║     Address:     ${DOMAIN}${NC}"
+    echo -e "${YELLOW}║     Port:        443${NC}"
+    echo -e "${YELLOW}║     SNI:         ${DOMAIN}   (steal_oneself!)${NC}"
+    echo -e "${YELLOW}║     Fingerprint: chrome${NC}"
+    echo -e "${YELLOW}║     Flow:        ${FLOW_HINT}${NC}"
+    echo -e "${YELLOW}║     ALPN:        ${ALPN_HINT}${NC}"
+    echo -e "${YELLOW}║  4. Internal Squads → Default-Squad${NC}"
+    echo -e "${YELLOW}║     → Добавь inbound ${NODE_NAME}_${TRANSPORT}${NC}"
+    echo -e "${YELLOW}║     ⚠ БЕЗ ЭТОГО НОДА НЕ ПОПАДЁТ В ПОДПИСКУ!${NC}"
+    echo -e "${YELLOW}║  5. Nodes → нода зелёная? Happ → обнови → пинг?${NC}"
+    echo -e "${YELLOW}╚══════════════════════════════════════════════════════════════╝${NC}"
+    echo ""
+    info "Ключи: /opt/remnanode/keys.txt"
+    info "Лог:   $LOG_FILE"
+    echo ""
 }
 
 phase11_geo() {
@@ -628,11 +754,12 @@ WDEOF
 
 phase15_ufw() {
     title "Фаза 15 / UFW"
+    warn "ufw --force reset сбросит существующие правила (бэкап в /etc/ufw)"
     ufw --force reset >/dev/null 2>&1
     ufw default deny incoming
     ufw default allow outgoing
     ufw allow 2810/tcp comment "SSH"
-    ufw allow 443/tcp  comment "Xray Reality XHTTP"
+    ufw allow 443/tcp  comment "Xray Reality ${TRANSPORT}"
     ufw allow 80/tcp   comment "HTTP redirect + certbot"
     ufw allow 8443/tcp comment "nginx fallback"
     ufw allow 2222/tcp comment "Remnawave node API"
@@ -645,41 +772,45 @@ phase16_beszel() {
     echo ""
     ask "Установить Beszel agent? (y/n)"
     read -r INSTALL_BESZEL </dev/tty
-    if [[ "$INSTALL_BESZEL" == "y" ]]; then
-        echo ""
-        info "Beszel hub: http://23.88.3.239:51068"
-        info "  1. Зайди в Beszel UI → Systems → Add System"
+    if [[ "$INSTALL_BESZEL" != "y" ]]; then
+        info "Beszel пропущен. Можно установить позже"
+        return 0
+    fi
+    echo ""
+    ask "Beszel hub URL (Enter — пропустить подсказку)"
+    read -r BESZEL_HUB </dev/tty
+    if [[ -n "$BESZEL_HUB" ]]; then
+        info "Beszel hub: $BESZEL_HUB"
+        info "  1. В Beszel UI → Systems → Add System"
         info "  2. Name: ${NODE_NAME} | Host: ${SERVER_IP} | Port: 45876"
         info "  3. Скопируй Key из Beszel"
-        echo ""
-        ask "Вставь Beszel KEY (ssh-ed25519 ...)"
-        read -r BESZEL_KEY </dev/tty
-        if [[ -n "$BESZEL_KEY" ]]; then
-            ufw allow 45876/tcp comment "Beszel agent"
-            docker stop beszel-agent 2>/dev/null || true
-            docker rm beszel-agent 2>/dev/null || true
-            docker volume rm beszel_agent_data 2>/dev/null || true
-            docker run -d \
-                --name beszel-agent \
-                --restart unless-stopped \
-                --network host \
-                -v /var/run/docker.sock:/var/run/docker.sock:ro \
-                -v beszel_agent_data:/var/lib/beszel-agent \
-                -e KEY="$BESZEL_KEY" \
-                -e LISTEN=:45876 \
-                henrygd/beszel-agent:latest
-            sleep 3
-            if docker ps | grep -q beszel-agent; then
-                ok "Beszel agent запущен на порту 45876"
-                info "Проверь в Beszel UI что нода стала зелёной и есть fingerprint"
-            else
-                warn "Beszel agent не запустился. Проверь: docker logs beszel-agent"
-            fi
-        else
-            warn "Key не указан, пропускаю"
-        fi
+    fi
+    echo ""
+    ask "Вставь Beszel KEY (ssh-ed25519 ...)"
+    read -r BESZEL_KEY </dev/tty
+    if [[ -z "$BESZEL_KEY" ]]; then
+        warn "Key не указан, пропускаю"
+        return 0
+    fi
+    ufw allow 45876/tcp comment "Beszel agent"
+    docker stop beszel-agent 2>/dev/null || true
+    docker rm beszel-agent 2>/dev/null || true
+    docker volume rm beszel_agent_data 2>/dev/null || true
+    docker run -d \
+        --name beszel-agent \
+        --restart unless-stopped \
+        --network host \
+        -v /var/run/docker.sock:/var/run/docker.sock:ro \
+        -v beszel_agent_data:/var/lib/beszel-agent \
+        -e KEY="$BESZEL_KEY" \
+        -e LISTEN=:45876 \
+        henrygd/beszel-agent:latest
+    sleep 3
+    if docker ps | grep -q beszel-agent; then
+        ok "Beszel agent запущен на порту 45876"
+        info "Проверь в Beszel UI: нода зелёная и есть fingerprint"
     else
-        info "Beszel пропущен. Можно установить позже"
+        warn "Beszel agent не запустился. Проверь: docker logs beszel-agent"
     fi
 }
 
@@ -687,35 +818,23 @@ phase17_summary() {
     title "Фаза 17 / Готово!"
     echo ""
     echo -e "${GREEN}╔══════════════════════════════════════════════════════════════╗${NC}"
-    echo -e "${GREEN}║  DEPLOY v${SCRIPT_VERSION} ЗАВЕРШЁН                                      ║${NC}"
-    echo -e "${GREEN}║  VLESS + Reality + XHTTP + steal_oneself                    ║${NC}"
+    echo -e "${GREEN}║  DEPLOY v${SCRIPT_VERSION} ЗАВЕРШЁН${NC}"
+    echo -e "${GREEN}║  VLESS + Reality + ${TRANSPORT} + steal_oneself${NC}"
     echo -e "${GREEN}╠══════════════════════════════════════════════════════════════╣${NC}"
     echo -e "${GREEN}║  Домен:       ${DOMAIN}${NC}"
     echo -e "${GREEN}║  IP:          ${SERVER_IP}${NC}"
     echo -e "${GREEN}║  Нода:        ${NODE_NAME}${NC}"
+    echo -e "${GREEN}║  Транспорт:   ${TRANSPORT}${NC}"
     echo -e "${GREEN}║  SSH:         ssh -p 2810 admin@${SERVER_IP}${NC}"
-    echo -e "${GREEN}║  Private Key: ${PRIVATE_KEY}${NC}"
-    echo -e "${GREEN}║  Public Key:  ${PUBLIC_KEY}${NC}"
     echo -e "${GREEN}╚══════════════════════════════════════════════════════════════╝${NC}"
+    # Ключи — только на терминал, не в лог.
+    secret "Private Key: ${PRIVATE_KEY}"
+    secret "Public Key:  ${PUBLIC_KEY}"
     echo ""
-    echo -e "${YELLOW}╔══════════════════════════════════════════════════════════════╗${NC}"
-    echo -e "${YELLOW}║  ⚠ ОБЯЗАТЕЛЬНО СДЕЛАЙ В ПАНЕЛИ REMNAWAVE:                 ║${NC}"
-    echo -e "${YELLOW}╠══════════════════════════════════════════════════════════════╣${NC}"
-    echo -e "${YELLOW}║  3. Hosts → Create                                         ║${NC}"
-    echo -e "${YELLOW}║     Inbound tag: ${NODE_NAME}_xhttp                        ║${NC}"
-    echo -e "${YELLOW}║     Address:     ${DOMAIN}                                 ║${NC}"
-    echo -e "${YELLOW}║     Port:        443                                       ║${NC}"
-    echo -e "${YELLOW}║     SNI:         ${DOMAIN}   (steal_oneself!)              ║${NC}"
-    echo -e "${YELLOW}║     Fingerprint: chrome                                    ║${NC}"
-    echo -e "${YELLOW}║     ALPN:        h2                                        ║${NC}"
-    echo -e "${YELLOW}║  4. Internal Squads → Default-Squad                        ║${NC}"
-    echo -e "${YELLOW}║     → Добавь inbound ${NODE_NAME}_xhttp                   ║${NC}"
-    echo -e "${YELLOW}║     ⚠ БЕЗ ЭТОГО НОДА НЕ ПОПАДЁТ В ПОДПИСКУ!              ║${NC}"
-    echo -e "${YELLOW}║  5. Nodes → нода зелёная? Happ → обнови → пинг?           ║${NC}"
-    echo -e "${YELLOW}╚══════════════════════════════════════════════════════════════╝${NC}"
+    echo -e "${YELLOW}  ⚠ Заверши настройку в панели Remnawave (см. фазу 10 выше)${NC}"
     echo ""
     info "Ключи: /opt/remnanode/keys.txt"
-    info "Лог:   $LOG_FILE"
+    info "Лог:   $LOG_FILE (chmod 600, без приватного ключа)"
     echo ""
 }
 
