@@ -1,30 +1,74 @@
 #!/usr/bin/env bash
 # =============================================================================
-# deploy-remnanode.sh v3.6
+# deploy-remnanode.sh v3.7
 # VLESS + Reality + (TCP/Vision | XHTTP | BOTH) + steal_oneself
 #
 # Разворачивает remnawave-node на чистом Ubuntu 24.04.
-# Один домен на ноду. Xray на 443 напрямую. nginx — только fallback.
+# Один домен на ноду. Xray на 443 напрямую. nginx — fallback + ACME.
 #
 # Запуск:
 #   wget -O deploy.sh https://raw.githubusercontent.com/anfixit/routerus/main/deploy-remnanode.sh
 #   bash deploy.sh
 #
+# Changelog v3.7 (аудит + актуализация транспорта):
+#   - FIX(crit): фейковый сайт получает chmod 644/755 — под umask 077 он
+#     создавался 600 root и nginx-воркер (www-data) отдавал 403 вместо
+#     лендинга, ломая steal_oneself ровно там, где он нужен.
+#   - FIX: SSH — mask ssh.socket (не disable): apt upgrade больше не воскрешает
+#     сокет на :22, из-за которого рвались коннекты. + sshd -t перед рестартом.
+#   - FIX: SSL без даунтайма nginx — issuance и renewal через webroot,
+#     nginx на :80 держит ACME постоянно (раньше certbot гасил nginx =
+#     детектируемая дыра в steal_oneself на время продления).
+#   - FIX: update-geo — валидация размера перед подменой live-файла и рестарт
+#     ноды ТОЛЬКО при реальном изменении (битый .dat больше не роняет Xray,
+#     недоступность GitHub не даёт ночной пустой рестарт).
+#   - FIX: NODE_NAME санитизируется (JSON-инъекция), xhttp-порт проверяется на
+#     коллизию с занятыми портами, IP при неудаче автодетекта спрашивается.
+#   - FIX: SSH_PORT — единая readonly-константа вместо 6 литералов.
+#   - FIX: apt upgrade только при первичной установке (защита живой ноды при
+#     идемпотентном ре-запуске); парсинг ключей терпим к Xray 26.x (Password).
+#   - NEW: XHTTP mode=packet-up + api-образный path — устойчивее к поведенческому
+#     анализу мобильного ТСПУ (МТС/Мегафон) в РФ-2026.
 # Changelog v3.6:
-#   - NEW: транспорт both — tcp:443 + xhttp:<port> в одном профиле,
-#     общий privateKey. Подписка отдаёт обе ссылки; podkop берёт tcp.
-#   - NEW: порт xhttp спрашивается для both, UFW открывает его сам
-#   - FIX: подсказка Flow — панель добавляет flow автоматически (не поле)
+#   - транспорт both (tcp:443 + xhttp:<port>), UFW сам открывает xhttp-порт
 # Changelog v3.5 (аудит безопасности):
-#   - SEC: лог 600, приватный ключ не в лог, Beszel hub не захардкожен
-#   - FIX: getent вместо dig, ключи ssh-/ecdsa-/sk-, fail2ban systemd,
-#          бэкапы конфигов, HTTPS-проверка сети, shortIds генерируются
-# Changelog v3.4:
-#   - NEW: выбор транспорта tcp/xhttp (по умолчанию tcp + flow vision)
+#   - лог 600, приватный ключ не в лог, Beszel hub не захардкожен, getent,
+#     fail2ban systemd, бэкапы конфигов, HTTPS-проверка сети
 # =============================================================================
 
 set -euo pipefail
 
+# --- Константы (единый источник истины) --------------------------------------
+readonly SCRIPT_VERSION="3.7"
+readonly LOG_FILE="/var/log/deploy-remnanode.log"
+readonly SSH_PORT=2810
+readonly NODE_API_PORT=2222
+readonly NGINX_FALLBACK_PORT=8443
+readonly WEBROOT="/var/www/html"
+readonly OPT_DIR="/opt/remnanode"
+readonly GEO_DIR="${OPT_DIR}/geodata"
+readonly STATE_MARKER="${OPT_DIR}/.deployed"   # флаг «уже разворачивали»
+readonly GEO_MIN_SIZE=100000                   # <100КБ = битый/HTML-ошибка
+readonly GEO_BASE_URL="https://raw.githubusercontent.com/runetfreedom/russia-v2ray-rules-dat/release"
+
+# Образ для генерации x25519. Пинуется env-переменной для воспроизводимости.
+readonly XRAY_KEYGEN_IMAGE="${XRAY_KEYGEN_IMAGE:-ghcr.io/xtls/xray-core:latest}"
+
+# Email для Let's Encrypt (пустой → регистрация без email).
+readonly CERTBOT_EMAIL="${CERTBOT_EMAIL:-}"
+
+# XHTTP-транспорт. packet-up дробит upload на «api-запросы» — лучший режим
+# против поведенческого DPI на мобильных сетях РФ (2026).
+readonly XHTTP_MODE="packet-up"
+readonly XHTTP_PATH="/api/v1/update"
+
+# Значения по умолчанию, переопределяемые в phase1.
+XHTTP_PORT=8444
+
+# Порты, занятые самой нодой (для проверки коллизий xhttp).
+readonly RESERVED_PORTS=(443 80 "$SSH_PORT" "$NODE_API_PORT" "$NGINX_FALLBACK_PORT")
+
+# --- Цвета и вывод ------------------------------------------------------------
 RED='\033[0;31m'; GREEN='\033[0;32m'; YELLOW='\033[1;33m'
 BLUE='\033[0;34m'; CYAN='\033[0;36m'; NC='\033[0m'
 
@@ -38,11 +82,7 @@ ask()   { echo -ne "${YELLOW}  ▸ $1: ${NC}"; }
 # Печать секрета только на терминал, минуя tee-лог.
 secret() { echo -e "${GREEN}  $1${NC}" >/dev/tty; }
 
-SCRIPT_VERSION="3.6"
-LOG_FILE="/var/log/deploy-remnanode.log"
-XHTTP_PORT=8444
-
-# Лог не должен быть мир-читаемым (в него попадает stdout всего скрипта).
+# --- Лог (не мир-читаемый: в него уходит весь stdout) ------------------------
 umask 077
 touch "$LOG_FILE"
 chmod 600 "$LOG_FILE"
@@ -59,6 +99,8 @@ backup_file() {
 }
 
 check_internet() {
+    # GitHub нужен дальше в любом случае (geo, docker-скрипт), потому проверяем
+    # именно его достижимость, а не «интернет вообще».
     if command -v curl >/dev/null 2>&1; then
         curl -fsS --max-time 6 https://api.github.com >/dev/null 2>&1 \
             && return 0
@@ -70,10 +112,11 @@ check_internet() {
 }
 
 get_server_ip() {
+    # Только HTTPS: по plaintext MITM мог бы подсунуть чужой IP.
     local ip=''
     if command -v curl >/dev/null 2>&1; then
-        ip=$(curl -s4 --max-time 6 ifconfig.me 2>/dev/null \
-            || curl -s4 --max-time 6 icanhazip.com 2>/dev/null) || true
+        ip=$(curl -s4 --max-time 6 https://ifconfig.me 2>/dev/null \
+            || curl -s4 --max-time 6 https://icanhazip.com 2>/dev/null) || true
     fi
     if [[ -z "$ip" ]] && command -v wget >/dev/null 2>&1; then
         ip=$(wget -qO- --timeout=6 https://ifconfig.me 2>/dev/null) || true
@@ -81,6 +124,31 @@ get_server_ip() {
     echo "$ip"
 }
 
+port_reserved() {
+    # 0, если порт входит в список занятых нодой.
+    local p="$1" r
+    for r in "${RESERVED_PORTS[@]}"; do
+        [[ "$p" == "$r" ]] && return 0
+    done
+    return 1
+}
+
+# Скачать один geo-файл с валидацией размера. Возвращает 0 при успехе.
+# $1=имя_файла $2=url. Кладёт результат в $GEO_DIR/$1.
+fetch_geo() {
+    local url="$2" dst="${GEO_DIR}/$1"
+    if wget -q --timeout=60 --tries=3 "$url" -O "${dst}.tmp" \
+        && [[ -s "${dst}.tmp" ]] \
+        && (( $(stat -c%s "${dst}.tmp") >= GEO_MIN_SIZE )); then
+        mv "${dst}.tmp" "$dst"
+        chmod 644 "$dst"          # контейнер читает bind-mount :ro
+        return 0
+    fi
+    rm -f "${dst}.tmp"
+    return 1
+}
+
+# =============================================================================
 phase0_checks() {
     title "Фаза 0 / Проверки"
     if [[ $EUID -ne 0 ]]; then die "Запусти от root: sudo bash $0"; fi
@@ -91,8 +159,8 @@ phase0_checks() {
         die "Нужна Ubuntu 24.04+, у тебя $PRETTY_NAME"
     fi
     ok "Ubuntu $VERSION_ID"
-    check_internet || die "Нет интернета (проверил HTTPS к api.github.com)"
-    ok "Интернет доступен"
+    check_internet || die "GitHub недоступен (проверил HTTPS к api.github.com)"
+    ok "Сеть доступна"
     echo ""
     echo -e "${GREEN}  deploy-remnanode.sh v${SCRIPT_VERSION}${NC}"
     echo -e "${GREEN}  VLESS + Reality + steal_oneself${NC}"
@@ -114,6 +182,15 @@ phase1_input() {
     RESOLVED_IP=$(getent ahostsv4 "$DOMAIN" 2>/dev/null \
         | awk '{print $1; exit}') || true
     SERVER_IP=$(get_server_ip)
+
+    # Автодетект IP мог не сработать — тогда спрашиваем оператора, иначе
+    # пустой IP уйдёт в инструкции для панели и сводку.
+    if [[ -z "$SERVER_IP" ]]; then
+        warn "Не удалось определить внешний IP автоматически."
+        ask "Введи внешний IPv4 сервера вручную"
+        read -r SERVER_IP </dev/tty
+        [[ -z "$SERVER_IP" ]] && die "IP сервера обязателен"
+    fi
 
     if [[ -n "$RESOLVED_IP" && "$RESOLVED_IP" == "$SERVER_IP" ]]; then
         ok "DNS: $DOMAIN → $RESOLVED_IP (совпадает с IP сервера)"
@@ -148,14 +225,19 @@ phase1_input() {
     if [[ -z "$NODE_NAME" ]]; then
         NODE_NAME=$(echo "$DOMAIN" | tr '.-' '_')
     fi
+    # Имя уходит в JSON как tag — только tag-безопасные символы, иначе
+    # ручной ввод с кавычкой/переносом ломает Config Profile.
+    if ! [[ "$NODE_NAME" =~ ^[A-Za-z0-9_-]+$ ]]; then
+        die "Имя ноды: только латиница, цифры, _ и - (без пробелов и кавычек)"
+    fi
     ok "Имя ноды: $NODE_NAME"
 
     echo ""
     info "Транспорт VLESS + Reality:"
     info "  tcp   — RAW + xtls-rprx-vision. Совместим со всеми клиентами"
     info "          (Happ, v2rayNG, podkop/Nikki на mihomo). По умолчанию."
-    info "  xhttp — маскировка под HTTP. Обходит блокировку VLESS TCP,"
-    info "          но с частью клиентов (mihomo) менее стабилен."
+    info "  xhttp — маскировка под HTTP (mode=${XHTTP_MODE}). Устойчив к"
+    info "          поведенческому DPI на мобильных сетях РФ."
     info "  both  — оба inbound на одной ноде: tcp:443 (для podkop) +"
     info "          xhttp:<port>. Подписка отдаёт обе ссылки."
     ask "Транспорт (tcp/xhttp/both) [tcp]"
@@ -170,14 +252,16 @@ phase1_input() {
     if [[ "$TRANSPORT" == "both" ]]; then
         echo ""
         info "tcp занимает 443, для xhttp нужен отдельный порт."
-        info "Менее подозрительно выглядят 2053, 2083, 2096, 8443→8444."
+        info "Менее подозрительно выглядят 2053, 2083, 2096, 8444."
         ask "Порт для xhttp-inbound [8444]"
         read -r _p </dev/tty
         [[ -n "$_p" ]] && XHTTP_PORT="$_p"
         if ! [[ "$XHTTP_PORT" =~ ^[0-9]+$ ]] \
-            || (( XHTTP_PORT < 1 || XHTTP_PORT > 65535 )) \
-            || (( XHTTP_PORT == 443 )); then
-            die "Некорректный порт xhttp (1-65535, не 443)"
+            || (( XHTTP_PORT < 1 || XHTTP_PORT > 65535 )); then
+            die "Некорректный порт xhttp (диапазон 1-65535)"
+        fi
+        if port_reserved "$XHTTP_PORT"; then
+            die "Порт $XHTTP_PORT занят нодой (443/80/${SSH_PORT}/${NODE_API_PORT}/${NGINX_FALLBACK_PORT})"
         fi
         ok "xhttp-порт: $XHTTP_PORT"
     fi
@@ -200,7 +284,13 @@ phase2_deps() {
     title "Фаза 2 / Системные зависимости"
     export DEBIAN_FRONTEND=noninteractive
     apt-get update -qq
-    apt-get upgrade -y -qq
+    # Полный upgrade — только на первичной установке. На живой ноде при
+    # ре-запуске он мог утянуть ядро/докер и оборвать VPN посреди прогона.
+    if [[ ! -f "$STATE_MARKER" ]]; then
+        apt-get upgrade -y -qq
+    else
+        info "Повторный запуск — пропускаю apt upgrade (защита живой ноды)"
+    fi
     apt-get install -y -qq \
         curl wget git jq openssl cron dnsutils psmisc \
         nginx-full certbot fail2ban \
@@ -213,6 +303,7 @@ phase2_deps() {
         info "Устанавливаю Docker..."
         curl -fsSL https://get.docker.com | sh
         systemctl enable --now docker
+        command -v docker &>/dev/null || die "Docker не установился"
         ok "Docker установлен"
     else
         ok "Docker уже есть: $(docker --version | cut -d' ' -f3)"
@@ -238,7 +329,6 @@ DKEOF
 
 phase3_ssh() {
     title "Фаза 3 / SSH hardening"
-    SSH_PORT=2810
     if id "admin" &>/dev/null; then
         ok "Пользователь admin уже существует"
     else
@@ -258,8 +348,9 @@ phase3_ssh() {
     ok "sudo без пароля"
 
     cp /etc/ssh/sshd_config "/etc/ssh/sshd_config.bak.$(date +%s)"
+    mkdir -p /etc/ssh/sshd_config.d /run/sshd
     cat > /etc/ssh/sshd_config.d/hardening.conf << SSHEOF
-Port $SSH_PORT
+Port ${SSH_PORT}
 PermitRootLogin no
 PasswordAuthentication no
 PubkeyAuthentication yes
@@ -270,23 +361,37 @@ ClientAliveCountMax 2
 X11Forwarding no
 AllowUsers admin
 SSHEOF
-    systemctl disable ssh.socket 2>/dev/null || true
-    systemctl stop ssh.socket 2>/dev/null || true
-    systemctl restart ssh 2>/dev/null || systemctl restart sshd 2>/dev/null \
-        || true
-    ok "SSH: порт $SSH_PORT, key-only, root запрещён"
-    warn "ВАЖНО: Проверь подключение из ДРУГОГО терминала:"
-    warn "  ssh -p $SSH_PORT admin@$SERVER_IP"
+
+    # Валидируем ДО рестарта — иначе опечатка в конфиге запрёт доступ.
+    if ! sshd -t; then
+        die "sshd -t не прошёл — не рестартую SSH, доступ сохранён"
+    fi
+
+    # Ключевое от «SSH постоянно падает»: socket-активация игнорирует Port и
+    # оживает после apt upgrade openssh-server. mask держит её выключенной
+    # навсегда; порт 2810 обслуживает именно ssh.service.
+    systemctl disable --now ssh.socket 2>/dev/null || true
+    systemctl mask ssh.socket 2>/dev/null || true
+    systemctl unmask ssh 2>/dev/null || true
+    systemctl enable --now ssh 2>/dev/null || systemctl enable --now sshd
+    systemctl restart ssh 2>/dev/null || systemctl restart sshd
+
+    if ss -lntp 2>/dev/null | grep -qE ":${SSH_PORT}[[:space:]]"; then
+        ok "SSH: слушает :${SSH_PORT}, key-only, root запрещён, socket masked"
+    else
+        warn "SSH не слушает :${SSH_PORT} — проверь из VNC до выхода!"
+    fi
+    warn "ВАЖНО: проверь из ДРУГОГО терминала: ssh -p ${SSH_PORT} admin@${SERVER_IP}"
 }
 
 phase4_fail2ban() {
     title "Фаза 4 / fail2ban"
-    # backend=systemd — Ubuntu 24.04 по умолчанию journald, auth.log может
-    # отсутствовать.
-    cat > /etc/fail2ban/jail.local << 'F2BEOF'
+    # backend=systemd — на Ubuntu 24.04 журнал journald, auth.log может
+    # отсутствовать. Порт берётся из единой константы.
+    cat > /etc/fail2ban/jail.local << F2BEOF
 [sshd]
 enabled  = true
-port     = 2810
+port     = ${SSH_PORT}
 filter   = sshd
 backend  = systemd
 maxretry = 3
@@ -295,7 +400,7 @@ findtime = 600
 F2BEOF
     systemctl enable fail2ban
     systemctl restart fail2ban
-    ok "fail2ban: SSH на порту 2810, бан после 3 попыток"
+    ok "fail2ban: SSH на :${SSH_PORT}, бан после 3 попыток"
 }
 
 phase5_sysctl() {
@@ -329,37 +434,59 @@ SYSEOF
 }
 
 phase6_ssl() {
-    title "Фаза 6 / SSL-сертификат"
-    systemctl stop nginx 2>/dev/null || true
-    fuser -k 80/tcp 2>/dev/null || true
-    sleep 1
+    title "Фаза 6 / nginx :80 (ACME) + SSL-сертификат"
+    # nginx на :80 постоянно обслуживает ACME-challenge и редиректит остальное.
+    # Так и первичная выдача, и продление идут через webroot — nginx НЕ гасится,
+    # и steal_oneself-fallback не проваливается в connection refused при renewal.
+    mkdir -p "$WEBROOT"
+    rm -f /etc/nginx/sites-enabled/default
+    cat > /etc/nginx/sites-available/redirect.conf << RDEOF
+server {
+    listen 80 default_server;
+    listen [::]:80 default_server;
+    server_name _;
+    location /.well-known/acme-challenge/ { root ${WEBROOT}; }
+    location / { return 301 https://\$host\$request_uri; }
+}
+RDEOF
+    ln -sf /etc/nginx/sites-available/redirect.conf /etc/nginx/sites-enabled/
+    nginx -t || die "nginx (redirect) конфиг невалиден"
+    systemctl enable nginx
+    systemctl restart nginx
+
     if [[ -d "/etc/letsencrypt/live/${DOMAIN}" ]]; then
         ok "SSL для $DOMAIN уже есть"
     else
-        info "Получаю SSL для $DOMAIN..."
-        certbot certonly --standalone --non-interactive \
-            --agree-tos --register-unsafely-without-email \
-            -d "$DOMAIN" \
+        info "Получаю SSL для $DOMAIN (webroot, без остановки nginx)..."
+        local email_arg=(--register-unsafely-without-email)
+        [[ -n "$CERTBOT_EMAIL" ]] && email_arg=(--email "$CERTBOT_EMAIL")
+        certbot certonly --webroot -w "$WEBROOT" --non-interactive --agree-tos \
+            "${email_arg[@]}" -d "$DOMAIN" \
             || die "Не удалось получить SSL. Проверь: dig $DOMAIN A +short"
         ok "SSL $DOMAIN получен"
     fi
+
+    # Renewal тоже через webroot + reload (без stop). Глобальный cli.ini
+    # безопасен: authenticator webroot не гасит сервисы.
     backup_file /etc/letsencrypt/cli.ini
     cat > /etc/letsencrypt/cli.ini << CERTEOF
-pre-hook = systemctl stop nginx || true; fuser -k 80/tcp || true
-post-hook = systemctl start nginx || true
+authenticator = webroot
+webroot-path = ${WEBROOT}
+deploy-hook = systemctl reload nginx
 CERTEOF
     systemctl enable certbot.timer 2>/dev/null || true
-    ok "Автопродление SSL настроено"
+    ok "Автопродление SSL: webroot + reload nginx (zero-downtime)"
 }
 
 phase7_nginx() {
-    title "Фаза 7 / nginx fallback"
-    info "Reality dest → 127.0.0.1:8443 (DPI/пробберы видят реальный сайт)"
-    rm -f /etc/nginx/sites-enabled/default
+    title "Фаза 7 / nginx fallback :${NGINX_FALLBACK_PORT}"
+    info "Reality dest → 127.0.0.1:${NGINX_FALLBACK_PORT} (пробберы видят сайт)"
+    # ПРИМЕЧАНИЕ: синтаксис 'listen ... http2' — для nginx 1.24 (Ubuntu 24.04).
+    # Директиву 'http2 on;' вводить нельзя: она с nginx 1.25.1, на 24.04 сломает.
     cat > "/etc/nginx/sites-available/${DOMAIN}.conf" << NGXEOF
 server {
-    listen 8443 ssl http2 proxy_protocol;
-    listen [::]:8443 ssl http2 proxy_protocol;
+    listen ${NGINX_FALLBACK_PORT} ssl http2 proxy_protocol;
+    listen [::]:${NGINX_FALLBACK_PORT} ssl http2 proxy_protocol;
     server_name ${DOMAIN};
     set_real_ip_from 127.0.0.1;
     real_ip_header proxy_protocol;
@@ -369,33 +496,24 @@ server {
     ssl_protocols       TLSv1.2 TLSv1.3;
     ssl_ciphers         HIGH:!aNULL:!MD5;
     ssl_prefer_server_ciphers on;
-    root /var/www/html;
+    root ${WEBROOT};
     index index.html;
     location / {
         try_files \$uri \$uri/ =404;
     }
 }
 NGXEOF
-    cat > /etc/nginx/sites-available/redirect.conf << 'RDEOF'
-server {
-    listen 80 default_server;
-    listen [::]:80 default_server;
-    return 301 https://$host$request_uri;
-}
-RDEOF
     ln -sf "/etc/nginx/sites-available/${DOMAIN}.conf" \
         /etc/nginx/sites-enabled/
-    ln -sf /etc/nginx/sites-available/redirect.conf /etc/nginx/sites-enabled/
     rm -f /etc/nginx/stream-enabled/*.conf 2>/dev/null || true
     nginx -t || die "nginx конфиг невалиден"
-    systemctl enable nginx
-    systemctl start nginx
-    ok "nginx: HTTPS fallback на порту 8443"
+    systemctl reload nginx
+    ok "nginx: HTTPS fallback на :${NGINX_FALLBACK_PORT}"
 }
 
 phase8_fakesite() {
     title "Фаза 8 / Фейковый сайт"
-    mkdir -p /var/www/html
+    mkdir -p "$WEBROOT"
 
     local THEMES=(
         "Web Development Studio|We build modern web applications|Web Development,Cloud Solutions,API Integration,DevOps Consulting"
@@ -417,8 +535,12 @@ phase8_fakesite() {
         "#4f46e5|#4338ca|#eef2ff"
         "#0d9488|#0f766e|#f0fdfa"
     )
-    local IDX=$((RANDOM % ${#THEMES[@]}))
-    local CIDX=$((RANDOM % ${#COLORS[@]}))
+    # Детерминированный выбор от хэша домена: на ре-запуске сайт не меняется,
+    # значит идемпотентность реальна и снятый ранее фингерпринт остаётся валиден.
+    local H
+    H=$(echo -n "$DOMAIN" | md5sum | tr -dc '0-9a-f')
+    local IDX=$(( 16#${H:0:4} % ${#THEMES[@]} ))
+    local CIDX=$(( 16#${H:4:4} % ${#COLORS[@]} ))
     IFS='|' read -r BIZ_NAME BIZ_DESC BIZ_SERVICES <<< "${THEMES[$IDX]}"
     IFS='|' read -r COLOR1 COLOR2 BG_COLOR <<< "${COLORS[$CIDX]}"
 
@@ -428,7 +550,7 @@ phase8_fakesite() {
     local YEAR
     YEAR=$(date +%Y)
 
-    cat > /var/www/html/index.html << SITEEOF
+    cat > "${WEBROOT}/index.html" << SITEEOF
 <!DOCTYPE html>
 <html lang="en">
 <head>
@@ -463,7 +585,7 @@ SITEEOF
 
     IFS=',' read -ra SVCS <<< "$BIZ_SERVICES"
     for svc in "${SVCS[@]}"; do
-        cat >> /var/www/html/index.html << CARDEOF
+        cat >> "${WEBROOT}/index.html" << CARDEOF
             <div class="card">
                 <h3>${svc}</h3>
                 <p>Professional ${svc,,} services tailored to your business needs and goals.</p>
@@ -471,7 +593,7 @@ SITEEOF
 CARDEOF
     done
 
-    cat >> /var/www/html/index.html << FOOTEOF
+    cat >> "${WEBROOT}/index.html" << FOOTEOF
         </div>
         <div class="about">
             <h2 style="margin-bottom:16px;">About Us</h2>
@@ -486,25 +608,30 @@ CARDEOF
 </html>
 FOOTEOF
 
-    ok "Фейковый сайт: ${SITE_NAME} — ${BIZ_NAME}"
+    # КРИТИЧНО: под umask 077 файлы создаются 600 root, и nginx-воркер
+    # (www-data) отдаёт 403 вместо лендинга — steal_oneself ломается ровно
+    # там, где нужен. Явно выставляем читаемые всем права.
+    find "$WEBROOT" -type d -exec chmod 755 {} +
+    find "$WEBROOT" -type f -exec chmod 644 {} +
+    ok "Фейковый сайт: ${SITE_NAME} — ${BIZ_NAME} (chmod 644)"
 }
 
 # Печатает JSON одного inbound: $1=tag $2=port $3=network(tcp|xhttp).
 build_inbound() {
     local tag="$1" port="$2" net="$3" net_block
     if [[ "$net" == "xhttp" ]]; then
-        net_block='"network": "xhttp",
-        "xhttpSettings": {
-          "mode": "auto",
-          "path": "/xhp",
-          "extra": {
-            "noSSEHeader": true,
-            "xPaddingBytes": "100-1000",
-            "scMaxBufferedPosts": 30,
-            "scMaxEachPostBytes": 1000000,
-            "scStreamUpServerSecs": "20-80"
+        net_block="\"network\": \"xhttp\",
+        \"xhttpSettings\": {
+          \"mode\": \"${XHTTP_MODE}\",
+          \"path\": \"${XHTTP_PATH}\",
+          \"extra\": {
+            \"noSSEHeader\": true,
+            \"xPaddingBytes\": \"100-1000\",
+            \"scMaxBufferedPosts\": 30,
+            \"scMaxEachPostBytes\": 1000000,
+            \"scStreamUpServerSecs\": \"20-80\"
           }
-        },'
+        },"
     else
         net_block='"network": "tcp",'
     fi
@@ -519,7 +646,7 @@ build_inbound() {
         ${net_block}
         "security": "reality",
         "realitySettings": {
-          "dest": "127.0.0.1:8443",
+          "dest": "127.0.0.1:${NGINX_FALLBACK_PORT}",
           "show": false,
           "xver": 1,
           "shortIds": ["","${SID1}","${SID2}","${SID3}"],
@@ -533,24 +660,26 @@ INBEOF
 
 phase9_keygen() {
     title "Фаза 9 / x25519 ключи + Config Profile"
-    mkdir -p /opt/remnanode
-    info "Генерирую x25519 ключи..."
-    KEY_OUTPUT=$(docker run --rm ghcr.io/xtls/xray-core:latest xray x25519 2>/dev/null) \
+    mkdir -p "$OPT_DIR"
+    info "Генерирую x25519 ключи (образ: ${XRAY_KEYGEN_IMAGE})..."
+    KEY_OUTPUT=$(docker run --rm "$XRAY_KEYGEN_IMAGE" xray x25519 2>/dev/null) \
         || KEY_OUTPUT=$(docker run --rm teddysun/xray:latest xray x25519 2>/dev/null) \
-        || KEY_OUTPUT=$(docker run --rm ghcr.io/xtls/xray-core x25519 2>/dev/null) \
+        || KEY_OUTPUT=$(docker run --rm "$XRAY_KEYGEN_IMAGE" x25519 2>/dev/null) \
         || die "Не удалось сгенерировать x25519 ключи"
-    PRIVATE_KEY=$(echo "$KEY_OUTPUT" | grep -i "private" | awk '{print $NF}')
-    PUBLIC_KEY=$(echo "$KEY_OUTPUT" | grep -i "public" | awk '{print $NF}')
+    # Xray 26.x сменил метки: private → 'Private key'/'PrivateKey',
+    # public → 'Public key'/'Password'. Терпимый парсинг под оба формата.
+    PRIVATE_KEY=$(echo "$KEY_OUTPUT" | grep -iE 'private' | awk '{print $NF}')
+    PUBLIC_KEY=$(echo "$KEY_OUTPUT" | grep -iE 'public|password' | awk '{print $NF}')
     if [[ -z "$PRIVATE_KEY" || -z "$PUBLIC_KEY" ]]; then
-        die "Не удалось извлечь ключи"
+        die "Не удалось извлечь ключи из вывода xray (формат изменился?)"
     fi
-    cat > /opt/remnanode/keys.txt << KEYSEOF
+    cat > "${OPT_DIR}/keys.txt" << KEYSEOF
 # x25519 keys generated $(date +%Y-%m-%d)
 PRIVATE_KEY=$PRIVATE_KEY
 PUBLIC_KEY=$PUBLIC_KEY
 KEYSEOF
-    chmod 600 /opt/remnanode/keys.txt
-    ok "Ключи сгенерированы (сохранены в /opt/remnanode/keys.txt, chmod 600)"
+    chmod 600 "${OPT_DIR}/keys.txt"
+    ok "Ключи сгенерированы (${OPT_DIR}/keys.txt, chmod 600)"
     secret "Private Key: $PRIVATE_KEY"
     secret "Public Key:  $PUBLIC_KEY"
 
@@ -613,7 +742,7 @@ phase10_panel() {
     echo -e "${YELLOW}╔══════════════════════════════════════════════════════════════╗${NC}"
     echo -e "${YELLOW}║  1. Config Profiles → Create — вставь JSON из фазы 9${NC}"
     echo -e "${YELLOW}║  2. Nodes → Create${NC}"
-    echo -e "${YELLOW}║     Name: ${NODE_NAME} | Address: ${SERVER_IP} | Port: 2222${NC}"
+    echo -e "${YELLOW}║     Name: ${NODE_NAME} | Address: ${SERVER_IP} | Port: ${NODE_API_PORT}${NC}"
     echo -e "${YELLOW}║     Привязать профиль, включить все inbound профиля${NC}"
     echo -e "${YELLOW}║     → Скопируй SECRET_KEY после создания!${NC}"
     echo -e "${YELLOW}╚══════════════════════════════════════════════════════════════╝${NC}"
@@ -634,12 +763,12 @@ phase10_panel() {
         echo -e "${YELLOW}║     ALPN: не задавать (flow vision добавится автоматически)${NC}"
     fi
     if [[ "$TRANSPORT" == "xhttp" ]]; then
-        echo -e "${YELLOW}║   • Host XHTTP:${NC}"
+        echo -e "${YELLOW}║   • Host XHTTP (mode ${XHTTP_MODE}, path ${XHTTP_PATH}):${NC}"
         echo -e "${YELLOW}║     inbound ${NODE_NAME}_xhttp | Address ${DOMAIN} | Port 443${NC}"
         echo -e "${YELLOW}║     ALPN: h2${NC}"
     fi
     if [[ "$TRANSPORT" == "both" ]]; then
-        echo -e "${YELLOW}║   • Host XHTTP:${NC}"
+        echo -e "${YELLOW}║   • Host XHTTP (mode ${XHTTP_MODE}, path ${XHTTP_PATH}):${NC}"
         echo -e "${YELLOW}║     inbound ${NODE_NAME}_xhttp | Address ${DOMAIN} | Port ${XHTTP_PORT}${NC}"
         echo -e "${YELLOW}║     ALPN: h2${NC}"
     fi
@@ -649,44 +778,37 @@ phase10_panel() {
     echo -e "${YELLOW}║  5. Nodes → нода зелёная? Клиент → обнови → пинг?${NC}"
     echo -e "${YELLOW}╚══════════════════════════════════════════════════════════════╝${NC}"
     echo ""
-    info "Проверь в готовой ссылке подписки: для tcp есть &flow=xtls-rprx-vision"
-    info "Ключи: /opt/remnanode/keys.txt | Лог: $LOG_FILE"
+    info "Проверь в ссылке подписки: для tcp есть &flow=xtls-rprx-vision"
+    info "Ключи: ${OPT_DIR}/keys.txt | Лог: $LOG_FILE"
     echo ""
 }
 
 phase11_geo() {
     title "Фаза 11 / Geo-файлы (ДО запуска контейнера!)"
-    local GEO_DIR="/opt/remnanode/geodata"
     mkdir -p "$GEO_DIR"
     info "Скачиваю geosite.dat и geoip.dat..."
-    wget -q --timeout=60 --tries=3 \
-        "https://raw.githubusercontent.com/runetfreedom/russia-v2ray-rules-dat/release/geosite.dat" \
-        -O "${GEO_DIR}/geosite.dat" || warn "Не удалось скачать geosite.dat"
-    wget -q --timeout=60 --tries=3 \
-        "https://raw.githubusercontent.com/runetfreedom/russia-v2ray-rules-dat/release/geoip.dat" \
-        -O "${GEO_DIR}/geoip.dat" || warn "Не удалось скачать geoip.dat"
-    if [[ -f "${GEO_DIR}/geosite.dat" && -s "${GEO_DIR}/geosite.dat" ]]; then
+    if fetch_geo geosite.dat "${GEO_BASE_URL}/geosite.dat"; then
         ok "geosite.dat: $(du -h "${GEO_DIR}/geosite.dat" | cut -f1)"
     else
-        warn "geosite.dat отсутствует или пуст"
+        warn "geosite.dat не скачан/невалиден"
     fi
-    if [[ -f "${GEO_DIR}/geoip.dat" && -s "${GEO_DIR}/geoip.dat" ]]; then
+    if fetch_geo geoip.dat "${GEO_BASE_URL}/geoip.dat"; then
         ok "geoip.dat: $(du -h "${GEO_DIR}/geoip.dat" | cut -f1)"
     else
-        warn "geoip.dat отсутствует или пуст"
+        warn "geoip.dat не скачан/невалиден"
     fi
 }
 
 phase12_docker() {
     title "Фаза 12 / remnawave-node"
-    cat > /opt/remnanode/.env << ENVEOF
+    cat > "${OPT_DIR}/.env" << ENVEOF
 SSL_CERT=/etc/letsencrypt/live/${DOMAIN}/fullchain.pem
 SSL_KEY=/etc/letsencrypt/live/${DOMAIN}/privkey.pem
 SECRET_KEY=${SECRET_KEY}
-NODE_PORT=2222
+NODE_PORT=${NODE_API_PORT}
 ENVEOF
-    chmod 600 /opt/remnanode/.env
-    cat > /opt/remnanode/docker-compose.yml << DCEOF
+    chmod 600 "${OPT_DIR}/.env"
+    cat > "${OPT_DIR}/docker-compose.yml" << DCEOF
 services:
   remnawave-node:
     image: remnawave/node:latest
@@ -704,10 +826,10 @@ services:
       - /etc/letsencrypt/live/${DOMAIN}/fullchain.pem:/etc/letsencrypt/live/${DOMAIN}/fullchain.pem:ro
       - /etc/letsencrypt/live/${DOMAIN}/privkey.pem:/etc/letsencrypt/live/${DOMAIN}/privkey.pem:ro
       - /etc/letsencrypt/archive/${DOMAIN}:/etc/letsencrypt/archive/${DOMAIN}:ro
-      - /opt/remnanode/geodata/geosite.dat:/usr/local/share/xray/geosite.dat:ro
-      - /opt/remnanode/geodata/geoip.dat:/usr/local/share/xray/geoip.dat:ro
+      - ${GEO_DIR}/geosite.dat:/usr/local/share/xray/geosite.dat:ro
+      - ${GEO_DIR}/geoip.dat:/usr/local/share/xray/geoip.dat:ro
 DCEOF
-    cd /opt/remnanode
+    cd "$OPT_DIR"
     docker compose pull
     docker compose up -d
     ok "remnawave-node запущен (network_mode: host, Xray :443)"
@@ -722,25 +844,53 @@ DCEOF
 
 phase13_maintenance() {
     title "Фаза 13 / Автообслуживание"
-    cat > /opt/remnanode/update-geo.sh << 'GEOEOF'
+    # update-geo: валидирует размер перед подменой live-файла и рестартит ноду
+    # ТОЛЬКО если файл реально изменился (битый .dat не роняет Xray; провал
+    # загрузки не даёт бессмысленный ночной рестарт).
+    cat > "${OPT_DIR}/update-geo.sh" << GEOEOF
 #!/bin/bash
-GEO_DIR="/opt/remnanode/geodata"
+set -uo pipefail
+GEO_DIR="${GEO_DIR}"
 LOG="/var/log/geo-update.log"
-wget -q --timeout=30 --tries=3 \
-    "https://raw.githubusercontent.com/runetfreedom/russia-v2ray-rules-dat/release/geosite.dat" \
-    -O "${GEO_DIR}/geosite.dat.tmp" && mv "${GEO_DIR}/geosite.dat.tmp" "${GEO_DIR}/geosite.dat"
-wget -q --timeout=30 --tries=3 \
-    "https://raw.githubusercontent.com/runetfreedom/russia-v2ray-rules-dat/release/geoip.dat" \
-    -O "${GEO_DIR}/geoip.dat.tmp" && mv "${GEO_DIR}/geoip.dat.tmp" "${GEO_DIR}/geoip.dat"
-cd /opt/remnanode && docker compose restart
-echo "$(date '+%Y-%m-%d %H:%M:%S') geo updated" >> "$LOG"
+MIN_SIZE=${GEO_MIN_SIZE}
+BASE="${GEO_BASE_URL}"
+CHANGED=0
+log(){ echo "\$(date '+%F %T') \$*" >> "\$LOG"; }
+
+update_one() {
+    local name="\$1" dst="\${GEO_DIR}/\$1"
+    if wget -q --timeout=30 --tries=3 "\${BASE}/\$name" -O "\${dst}.tmp" \\
+        && [[ -s "\${dst}.tmp" ]] \\
+        && (( \$(stat -c%s "\${dst}.tmp") >= MIN_SIZE )); then
+        if ! cmp -s "\${dst}.tmp" "\$dst" 2>/dev/null; then
+            mv "\${dst}.tmp" "\$dst"; chmod 644 "\$dst"; CHANGED=1
+            log "\$name updated"
+        else
+            rm -f "\${dst}.tmp"
+        fi
+    else
+        rm -f "\${dst}.tmp"; log "\$name download invalid, kept old"
+    fi
+}
+
+update_one geosite.dat
+update_one geoip.dat
+
+if (( CHANGED )); then
+    cd "${OPT_DIR}" && docker compose restart && log "node restarted"
+else
+    log "no changes, node untouched"
+fi
 GEOEOF
-    chmod +x /opt/remnanode/update-geo.sh
-    CRON_LINE="0 3 * * * /opt/remnanode/update-geo.sh"
-    EXISTING_CRON=$(crontab -l 2>/dev/null || true)
-    FILTERED_CRON=$(echo "$EXISTING_CRON" | grep -v "update-geo" || true)
-    printf '%s\n%s\n' "$FILTERED_CRON" "$CRON_LINE" | crontab -
-    ok "Cron: автообновление geo в 03:00"
+    chmod +x "${OPT_DIR}/update-geo.sh"
+
+    local CRON_LINE="0 3 * * * ${OPT_DIR}/update-geo.sh"
+    local EXISTING FILTERED
+    EXISTING=$(crontab -l 2>/dev/null || true)
+    FILTERED=$(echo "$EXISTING" | grep -v "update-geo" || true)
+    printf '%s\n%s\n' "$FILTERED" "$CRON_LINE" | grep -v '^$' | crontab -
+    ok "Cron: автообновление geo в 03:00 (с валидацией)"
+
     cat > /etc/apt/apt.conf.d/50unattended-upgrades << 'UUEOF'
 Unattended-Upgrade::Allowed-Origins {
     "${distro_id}:${distro_codename}-security";
@@ -753,18 +903,19 @@ UUEOF
 
 phase14_watchdog() {
     title "Фаза 14 / Watchdog"
-    cat > /opt/remnanode/watchdog.sh << 'WDEOF'
+    cat > "${OPT_DIR}/watchdog.sh" << WDEOF
 #!/bin/bash
 if ! docker ps | grep -q remnawave-node; then
-    echo "$(date '+%Y-%m-%d %H:%M:%S') watchdog: restarting" >> /var/log/watchdog.log
-    cd /opt/remnanode && docker compose up -d
+    echo "\$(date '+%Y-%m-%d %H:%M:%S') watchdog: restarting" >> /var/log/watchdog.log
+    cd "${OPT_DIR}" && docker compose up -d
 fi
 WDEOF
-    chmod +x /opt/remnanode/watchdog.sh
-    CRON_WD="*/5 * * * * /opt/remnanode/watchdog.sh"
-    EXISTING_CRON=$(crontab -l 2>/dev/null || true)
-    FILTERED_CRON=$(echo "$EXISTING_CRON" | grep -v "watchdog" || true)
-    printf '%s\n%s\n' "$FILTERED_CRON" "$CRON_WD" | crontab -
+    chmod +x "${OPT_DIR}/watchdog.sh"
+    local CRON_WD="*/5 * * * * ${OPT_DIR}/watchdog.sh"
+    local EXISTING FILTERED
+    EXISTING=$(crontab -l 2>/dev/null || true)
+    FILTERED=$(echo "$EXISTING" | grep -v "watchdog" || true)
+    printf '%s\n%s\n' "$FILTERED" "$CRON_WD" | grep -v '^$' | crontab -
     ok "Watchdog: проверка каждые 5 минут"
 }
 
@@ -774,17 +925,17 @@ phase15_ufw() {
     ufw --force reset >/dev/null 2>&1
     ufw default deny incoming
     ufw default allow outgoing
-    ufw allow 2810/tcp comment "SSH"
-    ufw allow 443/tcp  comment "Xray Reality"
-    ufw allow 80/tcp   comment "HTTP redirect + certbot"
-    ufw allow 8443/tcp comment "nginx fallback"
-    ufw allow 2222/tcp comment "Remnawave node API"
+    ufw allow "${SSH_PORT}/tcp"            comment "SSH"
+    ufw allow 443/tcp                      comment "Xray Reality"
+    ufw allow 80/tcp                       comment "HTTP redirect + certbot"
+    ufw allow "${NGINX_FALLBACK_PORT}/tcp" comment "nginx fallback"
+    ufw allow "${NODE_API_PORT}/tcp"       comment "Remnawave node API"
     if [[ "$TRANSPORT" == "both" ]]; then
         ufw allow "${XHTTP_PORT}/tcp" comment "Xray Reality XHTTP"
         ok "UFW: +${XHTTP_PORT}(xhttp)"
     fi
     ufw --force enable
-    ok "UFW: 2810(SSH) 443(Xray) 80(HTTP) 8443(nginx) 2222(API)"
+    ok "UFW: ${SSH_PORT}(SSH) 443(Xray) 80(HTTP) ${NGINX_FALLBACK_PORT}(nginx) ${NODE_API_PORT}(API)"
 }
 
 phase16_beszel() {
@@ -836,6 +987,8 @@ phase16_beszel() {
 
 phase17_summary() {
     title "Фаза 17 / Готово!"
+    # Ставим маркер: следующий запуск на этой ноде пропустит apt upgrade.
+    touch "$STATE_MARKER"
     echo ""
     echo -e "${GREEN}╔══════════════════════════════════════════════════════════════╗${NC}"
     echo -e "${GREEN}║  DEPLOY v${SCRIPT_VERSION} ЗАВЕРШЁН${NC}"
@@ -847,14 +1000,14 @@ phase17_summary() {
     echo -e "${GREEN}║  Транспорт:   ${TRANSPORT}${NC}"
     [[ "$TRANSPORT" == "both" ]] && \
         echo -e "${GREEN}║  Порты:       tcp:443 + xhttp:${XHTTP_PORT}${NC}"
-    echo -e "${GREEN}║  SSH:         ssh -p 2810 admin@${SERVER_IP}${NC}"
+    echo -e "${GREEN}║  SSH:         ssh -p ${SSH_PORT} admin@${SERVER_IP}${NC}"
     echo -e "${GREEN}╚══════════════════════════════════════════════════════════════╝${NC}"
     secret "Private Key: ${PRIVATE_KEY}"
     secret "Public Key:  ${PUBLIC_KEY}"
     echo ""
     echo -e "${YELLOW}  ⚠ Заверши настройку в панели Remnawave (см. фазу 10 выше)${NC}"
     echo ""
-    info "Ключи: /opt/remnanode/keys.txt"
+    info "Ключи: ${OPT_DIR}/keys.txt"
     info "Лог:   $LOG_FILE (chmod 600, без приватного ключа)"
     echo ""
 }
