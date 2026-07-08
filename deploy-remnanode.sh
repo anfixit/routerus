@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # =============================================================================
-# deploy-remnanode.sh v3.8
+# deploy-remnanode.sh v3.9
 # VLESS + Reality + (TCP/Vision | XHTTP | BOTH) + steal_oneself
 #
 # Разворачивает remnawave-node на чистом Ubuntu 24.04.
@@ -10,6 +10,24 @@
 #   wget -O deploy.sh https://raw.githubusercontent.com/anfixit/routerus/main/deploy-remnanode.sh
 #   bash deploy.sh
 #
+# Changelog v3.9 (UX + аудит, все замечания включая минорные):
+#   - NEW: выбор транспорта цифрой 1/2/3 (tcp/xhttp/both), слова тоже приняты.
+#   - NEW: примеры получения SSH-ключа для macOS/Linux и Windows
+#     (PowerShell + cmd.exe), а не только для мака.
+#   - SEC: Docker ставится из официального apt-репозитория с проверкой
+#     GPG-подписи пакетов (было `curl … | sh` без верификации). Заодно
+#     гарантирует docker compose v2 (плагин docker-compose-plugin).
+#   - FIX: проверка, что :443 свободен, ДО деплоя (только на первичной
+#     установке — на ре-запуске порт держит сама нода, это норма).
+#   - FIX: парсинг x25519 берёт первую строку (head -1) — будущий формат
+#     вывода Xray с лишними «private»-строками не сломает JSON.
+#   - FIX: fallback-цепочка keygen пробует для каждого образа оба вызова
+#     (`xray x25519` и `x25519`), а не хардкод `teddysun … xray x25519`.
+#   - FIX: check_internet не маскирует недоступность GitHub ICMP-пингом —
+#     результат curl/wget теперь авторитетен; ping лишь при отсутствии обоих.
+#   - FIX: старт контейнера проверяется поллингом (до 30с), а не слепым sleep.
+#   - CHG: 45876 (Beszel) добавлен в список занятых портов (коллизия xhttp).
+#   - COSMETIC: выровнены рамки вывода JSON-профиля (левая граница).
 # Changelog v3.8 (аудит безопасности + устойчивость деплоя):
 #   - FIX(crit): приватный ключ Reality больше не попадает в лог — Config
 #     Profile JSON пишется в /opt/remnanode/config-profile.json (600) и на
@@ -60,7 +78,7 @@
 set -euo pipefail
 
 # --- Константы (единый источник истины) --------------------------------------
-readonly SCRIPT_VERSION="3.8"
+readonly SCRIPT_VERSION="3.9"
 readonly LOG_FILE="/var/log/deploy-remnanode.log"
 readonly SSH_PORT=2810
 readonly NODE_API_PORT=2222
@@ -90,7 +108,8 @@ readonly XHTTP_PATH="/api/v1/update"
 XHTTP_PORT=8444
 
 # Порты, занятые самой нодой (для проверки коллизий xhttp).
-readonly RESERVED_PORTS=(443 80 "$SSH_PORT" "$NODE_API_PORT" "$NGINX_FALLBACK_PORT")
+# 45876 — Beszel agent (phase16, опционален, но резервируем заранее).
+readonly RESERVED_PORTS=(443 80 "$SSH_PORT" "$NODE_API_PORT" "$NGINX_FALLBACK_PORT" 45876)
 
 # --- Цвета и вывод ------------------------------------------------------------
 RED='\033[0;31m'; GREEN='\033[0;32m'; YELLOW='\033[1;33m'
@@ -123,15 +142,20 @@ backup_file() {
 }
 
 check_internet() {
-    # GitHub нужен дальше в любом случае (geo, docker-скрипт), потому проверяем
-    # именно его достижимость, а не «интернет вообще».
+    # GitHub нужен дальше в любом случае (geo, apt-репо Docker), потому проверяем
+    # именно его достижимость по HTTPS, а не «интернет вообще».
+    # Если HTTP-клиент есть — его результат авторитетен: недоступность GitHub
+    # НЕ маскируется ICMP-пингом (раньше ping мог дать ложный «сеть есть»).
     if command -v curl >/dev/null 2>&1; then
-        curl -fsS --max-time 6 https://api.github.com >/dev/null 2>&1 \
-            && return 0
+        curl -fsS --max-time 6 https://api.github.com >/dev/null 2>&1
+        return
     fi
     if command -v wget >/dev/null 2>&1; then
-        wget -q --spider --timeout=6 https://api.github.com && return 0
+        wget -q --spider --timeout=6 https://api.github.com
+        return
     fi
+    # Ни curl, ни wget нет (минимальный образ) — HTTPS проверить нечем,
+    # ICMP лишь подтверждает базовую связность до установки пакетов в phase2.
     ping -c1 -W3 1.1.1.1 >/dev/null 2>&1
 }
 
@@ -155,6 +179,14 @@ port_reserved() {
         [[ "$p" == "$r" ]] && return 0
     done
     return 1
+}
+
+# Сгенерировать x25519 через заданный образ. Пробуем оба стиля вызова:
+# `xray x25519` (образ без энтрипоинта xray) и `x25519` (энтрипоинт = xray).
+xray_x25519() {
+    local img="$1"
+    docker run --rm "$img" xray x25519 2>/dev/null \
+        || docker run --rm "$img" x25519 2>/dev/null
 }
 
 # Скачать один geo-файл с валидацией размера. Возвращает 0 при успехе.
@@ -183,8 +215,17 @@ phase0_checks() {
         die "Нужна Ubuntu 24.04+, у тебя $PRETTY_NAME"
     fi
     ok "Ubuntu $VERSION_ID"
-    check_internet || die "GitHub недоступен (проверил HTTPS к api.github.com)"
+    check_internet || die "Нет доступа к сети (проверил HTTPS к api.github.com)"
     ok "Сеть доступна"
+    # На первичной установке 443 должен быть свободен: иначе Xray внутри
+    # контейнера тихо упадёт на bind в phase12. На ре-запуске порт держит
+    # сама нода — это норма, потому проверяем только при отсутствии маркера.
+    if [[ ! -f "$STATE_MARKER" ]]; then
+        if ss -lntH 2>/dev/null | awk '{print $4}' | grep -qE ':443$'; then
+            die "Порт 443 уже занят другим процессом (ss -lntp | grep :443). Освободи его."
+        fi
+        ok "Порт 443 свободен"
+    fi
     echo ""
     echo -e "${GREEN}  deploy-remnanode.sh v${SCRIPT_VERSION}${NC}"
     echo -e "${GREEN}  VLESS + Reality + steal_oneself${NC}"
@@ -232,7 +273,15 @@ phase1_input() {
 
     echo ""
     info "SSH-ключ для пользователя admin (ed25519, rsa, ecdsa)."
-    info "На маке: cat ~/.ssh/id_ed25519.pub"
+    info "Нужен ПУБЛИЧНЫЙ ключ (файл .pub). Как его получить:"
+    info "  macOS / Linux:"
+    info "    создать (если нет):  ssh-keygen -t ed25519 -C \"admin@node\""
+    info "    показать .pub:        cat ~/.ssh/id_ed25519.pub"
+    info "  Windows (PowerShell):"
+    info "    создать (если нет):  ssh-keygen -t ed25519 -C \"admin@node\""
+    info "    показать .pub:        Get-Content \$env:USERPROFILE\\.ssh\\id_ed25519.pub"
+    info "  Windows (cmd.exe):"
+    info "    показать .pub:        type %USERPROFILE%\\.ssh\\id_ed25519.pub"
     echo ""
     ask "Вставь публичный SSH-ключ"
     read -r SSH_PUB_KEY </dev/tty
@@ -258,18 +307,20 @@ phase1_input() {
 
     echo ""
     info "Транспорт VLESS + Reality:"
-    info "  tcp   — RAW + xtls-rprx-vision. Совместим со всеми клиентами"
-    info "          (Happ, v2rayNG, podkop/Nikki на mihomo). По умолчанию."
-    info "  xhttp — маскировка под HTTP (mode=${XHTTP_MODE}). Устойчив к"
-    info "          поведенческому DPI на мобильных сетях РФ."
-    info "  both  — оба inbound на одной ноде: tcp:443 (для podkop) +"
-    info "          xhttp:<port>. Подписка отдаёт обе ссылки."
-    ask "Транспорт (tcp/xhttp/both) [tcp]"
-    read -r TRANSPORT </dev/tty
-    TRANSPORT="${TRANSPORT:-tcp}"
-    case "$TRANSPORT" in
-        tcp|xhttp|both) : ;;
-        *) die "Транспорт должен быть tcp, xhttp или both" ;;
+    info "  1) tcp   — RAW + xtls-rprx-vision. Совместим со всеми клиентами"
+    info "             (Happ, v2rayNG, podkop/Nikki на mihomo). Рекомендуется."
+    info "  2) xhttp — маскировка под HTTP (mode=${XHTTP_MODE}). Устойчив к"
+    info "             поведенческому DPI на мобильных сетях РФ."
+    info "  3) both  — оба inbound на одной ноде: tcp:443 (для podkop) +"
+    info "             xhttp:<port>. Подписка отдаёт обе ссылки."
+    ask "Выбери транспорт (1/2/3) [1]"
+    read -r _t </dev/tty
+    _t="${_t:-1}"
+    case "$_t" in
+        1|tcp)   TRANSPORT="tcp"   ;;
+        2|xhttp) TRANSPORT="xhttp" ;;
+        3|both)  TRANSPORT="both"  ;;
+        *) die "Выбор должен быть 1 (tcp), 2 (xhttp) или 3 (both)" ;;
     esac
     ok "Транспорт: $TRANSPORT"
 
@@ -339,15 +390,37 @@ phase2_deps() {
     ok "Пакеты установлены"
 
     if ! command -v docker &>/dev/null; then
-        info "Устанавливаю Docker..."
-        curl -fsSL https://get.docker.com | sh
+        info "Устанавливаю Docker (официальный apt-репозиторий, GPG-подпись)..."
+        # Официальный метод Docker: ключ + репозиторий + подписанные пакеты.
+        # Заменяет `curl … | sh` без верификации. Даёт docker compose v2.
+        install -m 0755 -d /etc/apt/keyrings
+        curl -fsSL https://download.docker.com/linux/ubuntu/gpg \
+            -o /etc/apt/keyrings/docker.asc \
+            || die "Не удалось скачать GPG-ключ Docker"
+        chmod a+r /etc/apt/keyrings/docker.asc
+        local deb_arch deb_codename
+        deb_arch=$(dpkg --print-architecture)
+        # shellcheck disable=SC1091
+        deb_codename=$(. /etc/os-release && echo "$VERSION_CODENAME")
+        echo "deb [arch=${deb_arch} signed-by=/etc/apt/keyrings/docker.asc] https://download.docker.com/linux/ubuntu ${deb_codename} stable" \
+            > /etc/apt/sources.list.d/docker.list
+        "${APT[@]}" update
+        "${APT[@]}" install -y \
+            docker-ce docker-ce-cli containerd.io \
+            docker-buildx-plugin docker-compose-plugin \
+            || die "Не удалось установить Docker из apt-репозитория"
         systemctl enable --now docker
         command -v docker &>/dev/null || die "Docker не установился"
-        ok "Docker установлен"
+        ok "Docker установлен (apt, подписанные пакеты)"
     else
         ok "Docker уже есть: $(docker --version | cut -d' ' -f3)"
     fi
     systemctl reset-failed docker 2>/dev/null || true
+
+    # Гарантируем docker compose v2 (плагин). Старый docker-compose v1 не подходит:
+    # весь скрипт использует синтаксис `docker compose …`.
+    docker compose version >/dev/null 2>&1 \
+        || die "Нужен docker compose v2 (плагин docker-compose-plugin). Установи его и повтори."
 
     # Docker log rotation (ДО запуска контейнеров!). Не затираем чужой конфиг.
     mkdir -p /etc/docker
@@ -712,14 +785,20 @@ phase9_keygen() {
     title "Фаза 9 / x25519 ключи + Config Profile"
     mkdir -p "$OPT_DIR"
     info "Генерирую x25519 ключи (образ: ${XRAY_KEYGEN_IMAGE})..."
-    KEY_OUTPUT=$(docker run --rm "$XRAY_KEYGEN_IMAGE" xray x25519 2>/dev/null) \
-        || KEY_OUTPUT=$(docker run --rm teddysun/xray:latest xray x25519 2>/dev/null) \
-        || KEY_OUTPUT=$(docker run --rm "$XRAY_KEYGEN_IMAGE" x25519 2>/dev/null) \
+    # Пробуем заданный образ, затем ghcr, затем teddysun. Для каждого — оба
+    # стиля вызова (см. xray_x25519). ghcr дублирует дефолт, но становится
+    # реальным резервом, если XRAY_KEYGEN_IMAGE переопределён env-переменной.
+    KEY_OUTPUT=$(xray_x25519 "$XRAY_KEYGEN_IMAGE") \
+        || KEY_OUTPUT=$(xray_x25519 "ghcr.io/xtls/xray-core:latest") \
+        || KEY_OUTPUT=$(xray_x25519 "teddysun/xray:latest") \
         || die "Не удалось сгенерировать x25519 ключи"
     # Xray 26.x сменил метки: private → 'Private key'/'PrivateKey',
     # public → 'Public key'/'Password'. Терпимый парсинг под оба формата.
-    PRIVATE_KEY=$(echo "$KEY_OUTPUT" | grep -iE 'private' | awk '{print $NF}')
-    PUBLIC_KEY=$(echo "$KEY_OUTPUT" | grep -iE 'public|password' | awk '{print $NF}')
+    # head -1: если вывод вдруг содержит слово 'private' в нескольких строках
+    # (будущий формат с Hash/Fingerprint) — берём только первую, чтобы не
+    # получить многострочный ключ и не сломать JSON.
+    PRIVATE_KEY=$(echo "$KEY_OUTPUT" | grep -iE 'private' | awk '{print $NF}' | head -1)
+    PUBLIC_KEY=$(echo "$KEY_OUTPUT" | grep -iE 'public|password' | awk '{print $NF}' | head -1)
     if [[ -z "$PRIVATE_KEY" || -z "$PUBLIC_KEY" ]]; then
         die "Не удалось извлечь ключи из вывода xray (формат изменился?)"
     fi
@@ -753,10 +832,10 @@ $(build_inbound "${NODE_NAME}_xhttp" "$XHTTP_PORT" xhttp)"
     esac
 
     echo ""
-    echo -e "${CYAN}╔══════════════════════════════════════════════════════════════╗${NC}"
-    echo -e "${CYAN}║  ГОТОВЫЙ JSON ДЛЯ CONFIG PROFILE В REMNAWAVE              ║${NC}"
-    echo -e "${CYAN}║  Скопируй и вставь в: Config Profiles → Create            ║${NC}"
-    echo -e "${CYAN}╚══════════════════════════════════════════════════════════════╝${NC}"
+    echo -e "${CYAN}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
+    echo -e "${CYAN}  ГОТОВЫЙ JSON ДЛЯ CONFIG PROFILE В REMNAWAVE${NC}"
+    echo -e "${CYAN}  Скопируй и вставь в: Config Profiles → Create${NC}"
+    echo -e "${CYAN}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
     echo ""
     local PROFILE="${OPT_DIR}/config-profile.json"
     cat > "$PROFILE" << JSONEOF
@@ -896,18 +975,28 @@ DCEOF
     cd "$OPT_DIR"
     docker compose pull
     docker compose up -d
-    ok "remnawave-node запущен (network_mode: host, Xray :443)"
-    sleep 5
-    if docker ps | grep -q remnawave-node; then
+    ok "remnawave-node стартует (network_mode: host, Xray :443)"
+    # Поллинг вместо слепого sleep: ждём до 30с появления running-контейнера.
+    local _tries=0
+    until docker ps --filter name=remnawave-node --filter status=running \
+            --format '{{.Names}}' | grep -q remnawave-node; do
+        _tries=$((_tries + 1))
+        (( _tries >= 15 )) && break
+        sleep 2
+    done
+    if docker ps --filter name=remnawave-node --filter status=running \
+            --format '{{.Names}}' | grep -q remnawave-node; then
         ok "Контейнер remnawave-node работает"
     else
-        warn "Контейнер не запустился! Логи:"
-        docker logs remnawave-node --tail 15 2>&1 || true
+        warn "Контейнер не поднялся за ~30с! Логи:"
+        docker logs remnawave-node --tail 20 2>&1 || true
     fi
 
     # Renewal-hook: после продления сертификата пересоздаём ноду, чтобы Xray/node
     # подхватили новый файл. live/ — симлинк, docker пинует старый inode при
     # маунте, поэтому нужен именно --force-recreate, а не restart.
+    # ПРИМЕЧАНИЕ: certbot запускает deploy-хук только при renew, НЕ при первичной
+    # выдаче. Для первого деплоя ноду уже поднял этот же phase12 выше — ок.
     mkdir -p /etc/letsencrypt/renewal-hooks/deploy
     cat > /etc/letsencrypt/renewal-hooks/deploy/remnanode.sh << RHEOF
 #!/bin/bash
@@ -1054,8 +1143,15 @@ phase16_beszel() {
         -e KEY="$BESZEL_KEY" \
         -e LISTEN=:45876 \
         henrygd/beszel-agent:latest
-    sleep 3
-    if docker ps | grep -q beszel-agent; then
+    local _tries=0
+    until docker ps --filter name=beszel-agent --filter status=running \
+            --format '{{.Names}}' | grep -q beszel-agent; do
+        _tries=$((_tries + 1))
+        (( _tries >= 6 )) && break
+        sleep 2
+    done
+    if docker ps --filter name=beszel-agent --filter status=running \
+            --format '{{.Names}}' | grep -q beszel-agent; then
         ok "Beszel agent запущен на порту 45876"
         info "Проверь в Beszel UI: нода зелёная и есть fingerprint"
     else
