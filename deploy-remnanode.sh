@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # =============================================================================
-# deploy-remnanode.sh v3.7
+# deploy-remnanode.sh v3.8
 # VLESS + Reality + (TCP/Vision | XHTTP | BOTH) + steal_oneself
 #
 # Разворачивает remnawave-node на чистом Ubuntu 24.04.
@@ -10,6 +10,27 @@
 #   wget -O deploy.sh https://raw.githubusercontent.com/anfixit/routerus/main/deploy-remnanode.sh
 #   bash deploy.sh
 #
+# Changelog v3.8 (аудит безопасности + устойчивость деплоя):
+#   - FIX(crit): приватный ключ Reality больше не попадает в лог — Config
+#     Profile JSON пишется в /opt/remnanode/config-profile.json (600) и на
+#     терминал, минуя tee. Раньше JSON с privateKey уходил в /var/log.
+#   - FIX(crit): SSH-хардинг в 00-hardening.conf (был hardening.conf). sshd
+#     берёт ПЕРВОЕ значение ключа, а 50-cloud-init.conf сортировался раньше и
+#     оставлял PasswordAuthentication yes. Плюс явное гашение пароля в cloud-init.
+#   - FIX(crit): nginx-fallback больше не публичен — listen 127.0.0.1 и порт
+#     8443 убран из UFW (Reality ходит на него по loopback; прямой коннект без
+#     proxy_protocol давал аномалию = фингерпринт).
+#   - FIX: phase2 не виснет — NEEDRESTART_MODE=a + ожидание cloud-init +
+#     DPkg::Lock::Timeout; -q вместо -qq (виден прогресс). +python3-systemd.
+#   - FIX: продление сертификата пересоздаёт ноду (renewal-hook, --force-recreate):
+#     live/ — симлинк, docker пинует старый inode, нода отдавала истёкший cert.
+#   - FIX: обязательный geoip.dat проверяется в phase11 (die), geosite —
+#     опционален и монтируется условно; больше нет битого контейнера при сбое GitHub.
+#   - FIX: update-geo.sh — up -d --force-recreate вместо restart.
+#   - FIX: Beszel — том не сносится (сохраняется fingerprint агента).
+#   - NEW: REMNANODE_IMAGE — образ ноды пинуется env-переменной.
+#   - CHG: bittorrent → BLOCK (было DIRECT): раздача с IP ноды = DMCA/абузы
+#     провайдера. Sniffing уже включён, торрент-трафик отсекается на ноде.
 # Changelog v3.7 (аудит + актуализация транспорта):
 #   - FIX(crit): фейковый сайт получает chmod 644/755 — под umask 077 он
 #     создавался 600 root и nginx-воркер (www-data) отдавал 403 вместо
@@ -39,7 +60,7 @@
 set -euo pipefail
 
 # --- Константы (единый источник истины) --------------------------------------
-readonly SCRIPT_VERSION="3.7"
+readonly SCRIPT_VERSION="3.8"
 readonly LOG_FILE="/var/log/deploy-remnanode.log"
 readonly SSH_PORT=2810
 readonly NODE_API_PORT=2222
@@ -53,6 +74,9 @@ readonly GEO_BASE_URL="https://raw.githubusercontent.com/runetfreedom/russia-v2r
 
 # Образ для генерации x25519. Пинуется env-переменной для воспроизводимости.
 readonly XRAY_KEYGEN_IMAGE="${XRAY_KEYGEN_IMAGE:-ghcr.io/xtls/xray-core:latest}"
+
+# Образ ноды. Пинуй тег для воспроизводимости: REMNANODE_IMAGE=remnawave/node:2.8.0
+readonly REMNANODE_IMAGE="${REMNANODE_IMAGE:-remnawave/node:latest}"
 
 # Email для Let's Encrypt (пустой → регистрация без email).
 readonly CERTBOT_EMAIL="${CERTBOT_EMAIL:-}"
@@ -283,17 +307,32 @@ phase1_input() {
 phase2_deps() {
     title "Фаза 2 / Системные зависимости"
     export DEBIAN_FRONTEND=noninteractive
-    apt-get update -qq
+    # needrestart на 24.04 рисует whiptail-меню рестарта сервисов; под tee-редиректом
+    # ему некуда выводиться → тихий висяк. Глушим на весь прогон.
+    export NEEDRESTART_MODE=a
+    export NEEDRESTART_SUSPEND=1
+    # На свежей облачной VM cloud-init/unattended-upgrades ещё держит dpkg-lock;
+    # без ожидания apt-get -q виснет молча. Ждём завершения инициализации.
+    if command -v cloud-init >/dev/null 2>&1; then
+        info "Жду завершения cloud-init (до 5 мин)..."
+        timeout 300 cloud-init status --wait >/dev/null 2>&1 || true
+    fi
+    # Lock::Timeout — apt сам подождёт освобождения замка вместо мгновенной ошибки.
+    # -q (а не -qq) оставляет видимый прогресс: долгий upgrade больше не выглядит
+    # как зависание.
+    local APT=(apt-get -o DPkg::Lock::Timeout=300 -q)
+    "${APT[@]}" update
     # Полный upgrade — только на первичной установке. На живой ноде при
     # ре-запуске он мог утянуть ядро/докер и оборвать VPN посреди прогона.
     if [[ ! -f "$STATE_MARKER" ]]; then
-        apt-get upgrade -y -qq
+        "${APT[@]}" upgrade -y
     else
         info "Повторный запуск — пропускаю apt upgrade (защита живой ноды)"
     fi
-    apt-get install -y -qq \
+    # python3-systemd нужен fail2ban backend=systemd (иначе jail молча не работает).
+    "${APT[@]}" install -y \
         curl wget git jq openssl cron dnsutils psmisc \
-        nginx-full certbot fail2ban \
+        nginx-full certbot fail2ban python3-systemd \
         unattended-upgrades apt-listchanges \
         ca-certificates gnupg lsb-release \
         || die "Не удалось установить пакеты (см. вывод выше)"
@@ -349,7 +388,11 @@ phase3_ssh() {
 
     cp /etc/ssh/sshd_config "/etc/ssh/sshd_config.bak.$(date +%s)"
     mkdir -p /etc/ssh/sshd_config.d /run/sshd
-    cat > /etc/ssh/sshd_config.d/hardening.conf << SSHEOF
+    # sshd берёт ПЕРВОЕ значение каждого ключа. Старое имя hardening.conf
+    # сортировалось ПОСЛЕ 50-cloud-init.conf, чей PasswordAuthentication yes
+    # побеждал → пароли оставались включены. 00- грузится первым по всем ключам.
+    rm -f /etc/ssh/sshd_config.d/hardening.conf
+    cat > /etc/ssh/sshd_config.d/00-hardening.conf << SSHEOF
 Port ${SSH_PORT}
 PermitRootLogin no
 PasswordAuthentication no
@@ -361,6 +404,11 @@ ClientAliveCountMax 2
 X11Forwarding no
 AllowUsers admin
 SSHEOF
+    # Подстраховка: явно гасим пароль и в дроп-ине cloud-init, если он есть.
+    if [[ -f /etc/ssh/sshd_config.d/50-cloud-init.conf ]]; then
+        sed -i 's/^[#[:space:]]*PasswordAuthentication.*/PasswordAuthentication no/' \
+            /etc/ssh/sshd_config.d/50-cloud-init.conf
+    fi
 
     # Валидируем ДО рестарта — иначе опечатка в конфиге запрёт доступ.
     if ! sshd -t; then
@@ -469,13 +517,14 @@ RDEOF
     # Renewal тоже через webroot + reload (без stop). Глобальный cli.ini
     # безопасен: authenticator webroot не гасит сервисы.
     backup_file /etc/letsencrypt/cli.ini
+    # deploy-hook НЕ здесь: recreate ноды делает renewal-hook из фазы 12
+    # (одного reload nginx мало — контейнер держит старый inode симлинка).
     cat > /etc/letsencrypt/cli.ini << CERTEOF
 authenticator = webroot
 webroot-path = ${WEBROOT}
-deploy-hook = systemctl reload nginx
 CERTEOF
     systemctl enable certbot.timer 2>/dev/null || true
-    ok "Автопродление SSL: webroot + reload nginx (zero-downtime)"
+    ok "Автопродление SSL: webroot (recreate ноды — renewal-hook из фазы 12)"
 }
 
 phase7_nginx() {
@@ -485,8 +534,9 @@ phase7_nginx() {
     # Директиву 'http2 on;' вводить нельзя: она с nginx 1.25.1, на 24.04 сломает.
     cat > "/etc/nginx/sites-available/${DOMAIN}.conf" << NGXEOF
 server {
-    listen ${NGINX_FALLBACK_PORT} ssl http2 proxy_protocol;
-    listen [::]:${NGINX_FALLBACK_PORT} ssl http2 proxy_protocol;
+    # Только loopback: fallback достижим лишь через Reality dest 127.0.0.1,
+    # наружу не публикуется (см. phase15 — порт убран из UFW).
+    listen 127.0.0.1:${NGINX_FALLBACK_PORT} ssl http2 proxy_protocol;
     server_name ${DOMAIN};
     set_real_ip_from 127.0.0.1;
     real_ip_header proxy_protocol;
@@ -708,7 +758,8 @@ $(build_inbound "${NODE_NAME}_xhttp" "$XHTTP_PORT" xhttp)"
     echo -e "${CYAN}║  Скопируй и вставь в: Config Profiles → Create            ║${NC}"
     echo -e "${CYAN}╚══════════════════════════════════════════════════════════════╝${NC}"
     echo ""
-    cat << JSONEOF
+    local PROFILE="${OPT_DIR}/config-profile.json"
+    cat > "$PROFILE" << JSONEOF
 {
   "log": { "loglevel": "warning" },
   "dns": { "servers": [{"address":"https://94.140.14.14/dns-query","domains":[],"skipFallback":false},"localhost"] },
@@ -723,7 +774,7 @@ ${INBOUNDS}
     "domainStrategy": "IPIfNonMatch",
     "rules": [
       {"type":"field","network":"udp","port":"443","outboundTag":"BLOCK"},
-      {"type":"field","protocol":["bittorrent"],"outboundTag":"DIRECT"},
+      {"type":"field","protocol":["bittorrent"],"outboundTag":"BLOCK"},
       {"type":"field","domain":["domain:doubleclick.net","domain:googlesyndication.com","domain:googleadservices.com","domain:google-analytics.com","domain:analytics.yandex.ru","domain:mc.yandex.ru","domain:crashlytics.com","domain:app-measurement.com","domain:appcenter.ms"],"outboundTag":"BLOCK"},
       {"type":"field","network":"udp","port":"135,137,138,139","outboundTag":"BLOCK"},
       {"type":"field","ip":["geoip:private"],"outboundTag":"DIRECT"}
@@ -731,8 +782,12 @@ ${INBOUNDS}
   }
 }
 JSONEOF
-    echo ""
-    info "Сохрани этот JSON — он понадобится для шага 10"
+    chmod 600 "$PROFILE"
+    # Приватный ключ внутри JSON: выводим только на терминал (минуя tee-лог)
+    # и держим в файле 600. В /var/log ключ больше НЕ попадает.
+    cat "$PROFILE" >/dev/tty
+    echo "" >/dev/tty
+    info "JSON сохранён в ${PROFILE} (chmod 600, в лог не пишется)"
     echo ""
 }
 
@@ -786,16 +841,20 @@ phase10_panel() {
 phase11_geo() {
     title "Фаза 11 / Geo-файлы (ДО запуска контейнера!)"
     mkdir -p "$GEO_DIR"
-    info "Скачиваю geosite.dat и geoip.dat..."
-    if fetch_geo geosite.dat "${GEO_BASE_URL}/geosite.dat"; then
-        ok "geosite.dat: $(du -h "${GEO_DIR}/geosite.dat" | cut -f1)"
-    else
-        warn "geosite.dat не скачан/невалиден"
-    fi
+    info "Скачиваю geoip.dat и geosite.dat..."
+    # geoip.dat обязателен: на него ссылается правило routing geoip:private.
+    # Без него Xray не поднимет конфиг — лучше упасть здесь, чем ловить битый
+    # контейнер в фазе 12 (docker подставил бы пустую директорию под маунт).
     if fetch_geo geoip.dat "${GEO_BASE_URL}/geoip.dat"; then
         ok "geoip.dat: $(du -h "${GEO_DIR}/geoip.dat" | cut -f1)"
     else
-        warn "geoip.dat не скачан/невалиден"
+        die "geoip.dat не скачан/невалиден (нужен для geoip:private). Повтори запуск."
+    fi
+    # geosite.dat текущими правилами не используется — при сбое поднимемся без него.
+    if fetch_geo geosite.dat "${GEO_BASE_URL}/geosite.dat"; then
+        ok "geosite.dat: $(du -h "${GEO_DIR}/geosite.dat" | cut -f1)"
+    else
+        warn "geosite.dat не скачан — нода поднимется без него"
     fi
 }
 
@@ -808,10 +867,16 @@ SECRET_KEY=${SECRET_KEY}
 NODE_PORT=${NODE_API_PORT}
 ENVEOF
     chmod 600 "${OPT_DIR}/.env"
+    # geoip.dat обязателен (гарантирован phase11), geosite — только если скачался.
+    local GEO_VOL="      - ${GEO_DIR}/geoip.dat:/usr/local/share/xray/geoip.dat:ro"
+    if [[ -s "${GEO_DIR}/geosite.dat" ]]; then
+        GEO_VOL="${GEO_VOL}
+      - ${GEO_DIR}/geosite.dat:/usr/local/share/xray/geosite.dat:ro"
+    fi
     cat > "${OPT_DIR}/docker-compose.yml" << DCEOF
 services:
   remnawave-node:
-    image: remnawave/node:latest
+    image: ${REMNANODE_IMAGE}
     container_name: remnawave-node
     restart: unless-stopped
     network_mode: host
@@ -826,8 +891,7 @@ services:
       - /etc/letsencrypt/live/${DOMAIN}/fullchain.pem:/etc/letsencrypt/live/${DOMAIN}/fullchain.pem:ro
       - /etc/letsencrypt/live/${DOMAIN}/privkey.pem:/etc/letsencrypt/live/${DOMAIN}/privkey.pem:ro
       - /etc/letsencrypt/archive/${DOMAIN}:/etc/letsencrypt/archive/${DOMAIN}:ro
-      - ${GEO_DIR}/geosite.dat:/usr/local/share/xray/geosite.dat:ro
-      - ${GEO_DIR}/geoip.dat:/usr/local/share/xray/geoip.dat:ro
+${GEO_VOL}
 DCEOF
     cd "$OPT_DIR"
     docker compose pull
@@ -840,6 +904,18 @@ DCEOF
         warn "Контейнер не запустился! Логи:"
         docker logs remnawave-node --tail 15 2>&1 || true
     fi
+
+    # Renewal-hook: после продления сертификата пересоздаём ноду, чтобы Xray/node
+    # подхватили новый файл. live/ — симлинк, docker пинует старый inode при
+    # маунте, поэтому нужен именно --force-recreate, а не restart.
+    mkdir -p /etc/letsencrypt/renewal-hooks/deploy
+    cat > /etc/letsencrypt/renewal-hooks/deploy/remnanode.sh << RHEOF
+#!/bin/bash
+systemctl reload nginx
+cd ${OPT_DIR} && docker compose up -d --force-recreate
+RHEOF
+    chmod +x /etc/letsencrypt/renewal-hooks/deploy/remnanode.sh
+    ok "Renewal-hook: recreate ноды при продлении сертификата"
 }
 
 phase13_maintenance() {
@@ -877,7 +953,7 @@ update_one geosite.dat
 update_one geoip.dat
 
 if (( CHANGED )); then
-    cd "${OPT_DIR}" && docker compose restart && log "node restarted"
+    cd "${OPT_DIR}" && docker compose up -d --force-recreate && log "node recreated"
 else
     log "no changes, node untouched"
 fi
@@ -928,14 +1004,15 @@ phase15_ufw() {
     ufw allow "${SSH_PORT}/tcp"            comment "SSH"
     ufw allow 443/tcp                      comment "Xray Reality"
     ufw allow 80/tcp                       comment "HTTP redirect + certbot"
-    ufw allow "${NGINX_FALLBACK_PORT}/tcp" comment "nginx fallback"
+    # nginx-fallback (${NGINX_FALLBACK_PORT}) наружу НЕ открываем: Reality ходит
+    # на него по 127.0.0.1, а прямой коннект без proxy_protocol давал аномалию.
     ufw allow "${NODE_API_PORT}/tcp"       comment "Remnawave node API"
     if [[ "$TRANSPORT" == "both" ]]; then
         ufw allow "${XHTTP_PORT}/tcp" comment "Xray Reality XHTTP"
         ok "UFW: +${XHTTP_PORT}(xhttp)"
     fi
     ufw --force enable
-    ok "UFW: ${SSH_PORT}(SSH) 443(Xray) 80(HTTP) ${NGINX_FALLBACK_PORT}(nginx) ${NODE_API_PORT}(API)"
+    ok "UFW: ${SSH_PORT}(SSH) 443(Xray) 80(HTTP) ${NODE_API_PORT}(API)"
 }
 
 phase16_beszel() {
@@ -966,7 +1043,8 @@ phase16_beszel() {
     ufw allow 45876/tcp comment "Beszel agent"
     docker stop beszel-agent 2>/dev/null || true
     docker rm beszel-agent 2>/dev/null || true
-    docker volume rm beszel_agent_data 2>/dev/null || true
+    # Том НЕ удаляем: в нём fingerprint агента. Снос = повторное добавление
+    # ноды в хабе на каждом ре-запуске.
     docker run -d \
         --name beszel-agent \
         --restart unless-stopped \
