@@ -120,23 +120,32 @@ title "1 / Watchdog: проверка реального inbound (BLK-2)"
 # Прежний watchdog смотрел `docker ps | grep` — то есть наличие контейнера, да
 # ещё подстрокой по всему выводу. Отказ, который случался на практике (контейнер
 # жив, API 2222 отвечает, панель зелёная, Xray на 443 мёртв), он не ловил вовсе.
-if [[ -f "${OPT_DIR}/watchdog.sh" ]] && grep -q '/dev/tcp/' "${OPT_DIR}/watchdog.sh" \
+# Версия в шапке watchdog.sh — единственный надёжный признак «файл устарел».
+# Проверять по наличию /dev/tcp мало: нода с watchdog v1 уже содержит эту
+# строку, и обновление до v2 (защита от шторма перезапусков) не доезжало бы.
+WD_VERSION=2
+if [[ -f "${OPT_DIR}/watchdog.sh" ]] \
+   && grep -q "watchdog-version: ${WD_VERSION}" "${OPT_DIR}/watchdog.sh" \
    && grep -q "INBOUND_PORTS=\"${INBOUND_PORTS}\"" "${OPT_DIR}/watchdog.sh"; then
-    skip "watchdog уже проверяет inbound ${INBOUND_PORTS} — пропускаю"
+    skip "watchdog уже версии ${WD_VERSION} и проверяет ${INBOUND_PORTS} — пропускаю"
 else
     backup_file "${OPT_DIR}/watchdog.sh"
     if (( DRY_RUN )); then
-        echo -e "${YELLOW}    [dry-run] перезаписать ${OPT_DIR}/watchdog.sh (проверка ${INBOUND_PORTS})${NC}"
+        echo -e "${YELLOW}    [dry-run] перезаписать ${OPT_DIR}/watchdog.sh (v${WD_VERSION}, порты ${INBOUND_PORTS})${NC}"
     else
         cat > "${OPT_DIR}/watchdog.sh" << WDEOF
 #!/bin/bash
+# watchdog-version: 2
 # Проверяет РЕАЛЬНЫЙ inbound, а не только наличие контейнера.
 set -uo pipefail
 OPT_DIR="${OPT_DIR}"
 LOG="/var/log/watchdog.log"
 STATE="\${OPT_DIR}/.watchdog_fails"
+PRIMED="\${OPT_DIR}/.watchdog_primed"   # нода хоть раз была полностью здорова
+GAVEUP="\${OPT_DIR}/.watchdog_giveup"   # счётчик безрезультатных рестартов
 INBOUND_PORTS="${INBOUND_PORTS}"
 FAIL_THRESHOLD=2     # рестарт только после 2 провалов подряд
+MAX_RESTARTS=3       # после стольких безрезультатных — только логировать
 
 exec 9>/run/remnanode-watchdog.lock
 flock -n 9 || exit 0
@@ -158,6 +167,8 @@ fi
 
 if (( alive )); then
     echo 0 > "\$STATE"
+    echo 0 > "\$GAVEUP"
+    [[ -f "\$PRIMED" ]] || { : > "\$PRIMED"; log "primed: нода здорова, автоперезапуск включён"; }
     exit 0
 fi
 
@@ -166,15 +177,37 @@ echo "\$fails" > "\$STATE"
 log "unhealthy: \${reason} (fail \${fails}/\${FAIL_THRESHOLD})"
 (( fails < FAIL_THRESHOLD )) && exit 0
 
-log "restarting node"
+# Нода НИ РАЗУ не была здоровой — идёт первичная настройка. Причина почти всегда
+# в панели (не включены inbound профиля), пересоздание её не лечит, зато рвёт
+# те соединения, которые уже работают.
+if [[ ! -f "\$PRIMED" ]]; then
+    log "НЕ перезапускаю: нода ещё ни разу не была здорова — похоже на незавершённую"
+    log "настройку. Проверь в панели Nodes → Edit, что включены ВСЕ inbound профиля."
+    echo 0 > "\$STATE"
+    exit 0
+fi
+
+gaveup=\$(cat "\$GAVEUP" 2>/dev/null || echo 0)
+if (( gaveup >= MAX_RESTARTS )); then
+    log "НЕ перезапускаю: \${gaveup} перезапусков подряд не помогли (\${reason})."
+    log "Нужна диагностика: bash check-node.sh"
+    echo 0 > "\$STATE"
+    exit 0
+fi
+
+log "restarting node (попытка \$(( gaveup + 1 ))/\${MAX_RESTARTS})"
 cd "\$OPT_DIR" && docker compose up -d --force-recreate >> "\$LOG" 2>&1
+echo \$(( gaveup + 1 )) > "\$GAVEUP"
 echo 0 > "\$STATE"
 WDEOF
         chmod +x "${OPT_DIR}/watchdog.sh"
         bash -n "${OPT_DIR}/watchdog.sh" || die "Сгенерированный watchdog.sh невалиден"
+        # Нода уже работает — считаем её здоровой, иначе первый же сбой попал бы
+        # в ветку «ещё ни разу не была здорова» и автолечение не включилось бы.
+        : > "${OPT_DIR}/.watchdog_primed"
     fi
-    ok "watchdog заменён: коннект на ${INBOUND_PORTS}, порог 2 провала, flock"
-    note "watchdog теперь ловит мёртвый Xray при живом контейнере"
+    ok "watchdog обновлён до v${WD_VERSION}: порты ${INBOUND_PORTS}, порог 2, предел 3 рестарта"
+    note "watchdog не будет пересоздавать ноду при незавершённой настройке панели"
 fi
 
 if crontab -l 2>/dev/null | grep -q 'watchdog'; then

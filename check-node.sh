@@ -148,6 +148,27 @@ if [[ -f "$PROFILE" ]] && command -v jq >/dev/null 2>&1; then
 
     DNSADDR=$(jq -r '.dns.servers[0].address // "?"' "$PROFILE" 2>/dev/null)
     info "DNS в профиле: ${DNSADDR}"
+
+    # Панель хранит инбаунды отдельными записями и при повторной вставке профиля
+    # может их не обновить: ноде уходит свежий конфиг, а ссылки подписки строятся
+    # из старых записей — с чужим публичным ключом. Снаружи это неотличимо от
+    # сломанной ноды: Reality молча отдаёт клиента на лендинг.
+    PUBKEY=$(awk -F= '/^PUBLIC_KEY=/{print $2; exit}' "${OPT_DIR}/keys.txt" 2>/dev/null || true)
+    if [[ -n "$PUBKEY" ]]; then
+        echo ""
+        info "Публичный ключ этой ноды:"
+        info "    ${PUBKEY}"
+        info "СВЕРЬ его с pbk= в ссылке подписки — значения обязаны совпадать."
+        info "Не совпало → хост в панели привязан к устаревшей записи инбаунда;"
+        info "пересоздай хост, ноду переустанавливать не нужно."
+    fi
+
+    # Порты в профиле обязаны различаться, иначе один inbound не поднимется.
+    DUPPORT=$(jq -r '[.inbounds[].port] | group_by(.) | map(select(length > 1)) | flatten | unique | join(", ")' \
+        "$PROFILE" 2>/dev/null || true)
+    if [[ -n "$DUPPORT" && "$DUPPORT" != "null" ]]; then
+        fail "в профиле несколько inbound на одном порту (${DUPPORT}) — один из них не запустится"
+    fi
     [[ "$DNSADDR" == *"94.140.14"* ]] \
         && warn "фильтрующий резолвер AdGuard: раскрываемый факт для Политики + ломает часть приложений (H-3)"
 else
@@ -160,13 +181,27 @@ title "3 / fail2ban"
 # об этом не узнаёт: джейл рапортует «enabled», а правил в iptables нет.
 if systemctl is-active --quiet fail2ban; then
     pass "служба fail2ban активна"
-    if iptables -S 2>/dev/null | grep -q 'f2b-'; then
-        BANNED=$(fail2ban-client status sshd 2>/dev/null \
-            | awk -F': *' '/Currently banned/{print $2}')
-        pass "цепочки f2b-* в iptables на месте (в бане сейчас: ${BANNED:-0})"
+    # Смотреть только в iptables нельзя: banaction может быть nftables-*, и тогда
+    # цепочки живут в nft ruleset, а `iptables -S` пуст — здоровая нода получала
+    # ложный FAIL. Проверяем оба фронта и заодно спрашиваем сам fail2ban.
+    F2B_WHERE=""
+    iptables -S 2>/dev/null | grep -q 'f2b-' && F2B_WHERE="iptables"
+    if [[ -z "$F2B_WHERE" ]] && command -v nft >/dev/null 2>&1; then
+        nft list ruleset 2>/dev/null | grep -qi 'f2b' && F2B_WHERE="nftables"
+    fi
+    JAILED=$(fail2ban-client status sshd 2>/dev/null || true)
+    if [[ -n "$F2B_WHERE" ]]; then
+        BANNED=$(awk -F': *' '/Currently banned/{print $2}' <<< "$JAILED")
+        pass "цепочки f2b-* на месте (${F2B_WHERE}, в бане сейчас: ${BANNED:-0})"
+    elif [[ -z "$JAILED" ]]; then
+        fail "джейл sshd не отвечает — fail2ban не защищает SSH"
+        info "чинится так: systemctl restart fail2ban && fail2ban-client status sshd"
     else
-        fail "цепочек f2b-* НЕТ в iptables — джейл 'enabled', но защиты нет (H-4)"
+        # Джейл жив, но правил не видно ни там, ни там. Чаще всего это ufw reset,
+        # снёсший цепочки, о чём fail2ban не узнаёт до своего рестарта (H-4).
+        fail "джейл sshd запущен, но правил нет ни в iptables, ни в nftables (H-4)"
         info "чинится так: systemctl restart fail2ban"
+        info "banaction: $(fail2ban-client get sshd actions 2>/dev/null | tr '\n' ' ')"
     fi
 else
     fail "служба fail2ban не активна"
@@ -200,6 +235,26 @@ if command -v ufw >/dev/null 2>&1 && ufw status >/dev/null 2>&1; then
 else
     fail "UFW не установлен или недоступен"
 fi
+
+# --- 4b. nginx: fallback для Reality -----------------------------------------
+title "4b / nginx (fallback steal_oneself)"
+# Reality отдаёт неопознанных клиентов и DPI-пробберы на 127.0.0.1:8443. Если
+# nginx лежит, проббер получает connection refused вместо сайта — то есть ровно
+# ту аномалию, ради устранения которой steal_oneself и делался.
+if systemctl is-active --quiet nginx; then
+    pass "nginx запущен"
+    if timeout 5 bash -c "exec 3<>/dev/tcp/127.0.0.1/${NGINX_FALLBACK_PORT}" 2>/dev/null; then
+        pass "fallback :${NGINX_FALLBACK_PORT} принимает соединения"
+    else
+        fail "fallback :${NGINX_FALLBACK_PORT} не отвечает — маскировка сломана"
+    fi
+else
+    fail "nginx НЕ запущен — Reality некуда отдавать пробберов (маскировка сломана)"
+    info "чинится так: nginx -t && systemctl start nginx"
+fi
+for f in index.html about.html 404.html robots.txt favicon.ico; do
+    [[ -f "/var/www/html/$f" ]] || warn "нет /var/www/html/$f — лендинг неполный"
+done
 
 # --- 5. SSL ------------------------------------------------------------------
 title "5 / Сертификат"
