@@ -400,7 +400,28 @@ phase1_input() {
     if [[ -f /etc/ssh/sshd_config.d/00-hardening.conf ]]; then
         ok "SSH-порт: ${SSH_PORT} (взят из текущей конфигурации ноды)"
     else
-        ok "SSH-порт: ${SSH_PORT} (случайный — константа на весь флот была маркером)"
+        echo ""
+        info "SSH-порт предлагается случайный: одинаковый нестандартный порт на"
+        info "всём флоте — редкое сочетание, по которому ноды собираются одним"
+        info "поиском в Censys. Отдельно взятой ноде случайность стойкости не даёт."
+        warn "ВАЖНО: у части хостеров есть внешний файрвол (security group), где"
+        warn "высокие порты закрыты. Если не уверена, что ${SSH_PORT} пропускают"
+        warn "снаружи — задай свой порт, который точно открыт."
+        ask "SSH-порт [${SSH_PORT}]"
+        read -r _sshport </dev/tty
+        if [[ -n "$_sshport" ]]; then
+            if ! [[ "$_sshport" =~ ^[0-9]+$ ]] || (( _sshport < 1 || _sshport > 65535 )); then
+                die "Некорректный SSH-порт (диапазон 1-65535)"
+            fi
+            if port_reserved "$_sshport"; then
+                die "Порт $_sshport занят нодой (443/80/${NODE_API_PORT}/${NGINX_FALLBACK_PORT}/${BESZEL_PORT})"
+            fi
+            if port_listening "$_sshport"; then
+                die "На порту $_sshport уже кто-то слушает (ss -lntp | grep :$_sshport)"
+            fi
+            SSH_PORT="$_sshport"
+        fi
+        ok "SSH-порт: ${SSH_PORT}"
         warn "ЗАПИШИ ЭТОТ ПОРТ. Он же продублирован в ${NODE_INFO} и в итоговой сводке."
     fi
 
@@ -659,6 +680,20 @@ SSHEOF
         die "sshd -t не прошёл — не рестартую SSH, доступ сохранён"
     fi
 
+    # UFW настраивается в фазе 14, но порт SSH меняется ЗДЕСЬ. Если файрвол уже
+    # активен (ре-запуск, образ хостера с включённым ufw), новый порт окажется
+    # закрыт ровно в тот момент, когда мы просим проверить доступ, — и проверка
+    # провалится не из-за ключа, а из-за файрвола. Открываем заранее.
+    # Правило идемпотентно: ufw не дублирует одинаковые записи.
+    if command -v ufw >/dev/null 2>&1; then
+        ufw allow "${SSH_PORT}/tcp" comment "SSH" >/dev/null 2>&1 || true
+        if ufw status 2>/dev/null | grep -q "Status: active"; then
+            ok "UFW активен — порт ${SSH_PORT} открыт заранее, до рестарта sshd"
+        else
+            info "Порт ${SSH_PORT} внесён в UFW заранее (файрвол включится в фазе 14)"
+        fi
+    fi
+
     # Ключевое от «SSH постоянно падает»: socket-активация игнорирует Port и
     # оживает после apt upgrade openssh-server. mask держит её выключенной
     # навсегда; выбранный порт обслуживает именно ssh.service.
@@ -696,10 +731,35 @@ SSHEOF
     warn "ПРОВЕРЬ СЕЙЧАС из ДРУГОГО терминала, не закрывая этот:"
     warn "    ssh -p ${SSH_PORT} admin@${SERVER_IP}"
     warn "Текущая сессия остаётся живой, пока ты не ответишь."
+    info "Если не пускает — частые причины по убыванию:"
+    info "  • внешний файрвол хостера (security group) закрывает порт ${SSH_PORT};"
+    info "  • ключ вставлен не полностью или это приватный ключ вместо .pub;"
+    info "  • подключаешься под root, а разрешён только admin."
     ask "Доступ подтверждён? (y/n)"
     read -r _sshok </dev/tty
     if [[ "$_sshok" != "y" ]]; then
-        die "Прервано до потери доступа. Текущая сессия жива, чини SSH и запусти заново."
+        # Сессия ещё жива, но sshd уже переехал на новый порт. Предлагаем вернуть
+        # прежний конфиг: иначе после закрытия терминала остаётся только консоль
+        # хостера, а это ровно тот сценарий, ради которого пауза и добавлена.
+        echo ""
+        ask "Вернуть прежнюю конфигурацию SSH? (y/n) [y]"
+        read -r _revert </dev/tty
+        if [[ -z "$_revert" || "$_revert" == "y" ]]; then
+            rm -f /etc/ssh/sshd_config.d/00-hardening.conf
+            systemctl unmask ssh.socket 2>/dev/null || true
+            if sshd -t 2>/dev/null; then
+                systemctl restart ssh 2>/dev/null || systemctl restart sshd 2>/dev/null || true
+                ok "Хардинг SSH откачен, sshd вернулся к прежним настройкам"
+                info "Порт ${SSH_PORT} остался открытым в UFW — вреда нет, уберёшь позже"
+            else
+                warn "sshd -t не прошёл после отката — НЕ закрывай эту сессию!"
+                warn "Бэкапы конфига: /etc/ssh/sshd_config.bak.* (бери самый свежий)"
+            fi
+        else
+            warn "Откат не делаю. НЕ закрывай эту сессию, пока не починишь доступ."
+            warn "Дроп-ин с портом: /etc/ssh/sshd_config.d/00-hardening.conf"
+        fi
+        die "Прервано до потери доступа. Разберись с SSH и запусти скрипт заново."
     fi
     ok "SSH-доступ подтверждён"
 }
