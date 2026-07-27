@@ -1533,7 +1533,7 @@ host_block() {
     echo "      Address:     ${DOMAIN}"
     echo "      Port:        ${port}"
     echo "      SNI:         ${DOMAIN}"
-    echo "      Fingerprint: chrome"
+    echo "      Fingerprint: firefox"
     if [[ "$kind" == "tcp" ]]; then
         echo "      ALPN:        НЕ задавать"
         echo "      Flow:        НЕ задавать — панель сама подставит xtls-rprx-vision"
