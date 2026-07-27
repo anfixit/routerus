@@ -235,6 +235,12 @@ port_listening() {
     ss -lntH 2>/dev/null | awk '{print $4}' | grep -qE "[:.]${1}\$"
 }
 
+port_owned_by_sshd() {
+    # 0, если порт слушает именно sshd. Нужно, чтобы оператор мог осознанно
+    # оставить текущий порт SSH: занятость им самим — не повод отказывать.
+    ss -lntpH 2>/dev/null | awk -v p="[:.]${1}\$" '$4 ~ p' | grep -q 'sshd'
+}
+
 rand_int() {
     # Равномерное целое в [$1;$2]. RANDOM даёт максимум 32767 — для диапазона
     # SSH-портов этого не хватает, потому берём 4 байта из urandom.
@@ -407,19 +413,33 @@ phase1_input() {
         warn "ВАЖНО: у части хостеров есть внешний файрвол (security group), где"
         warn "высокие порты закрыты. Если не уверена, что ${SSH_PORT} пропускают"
         warn "снаружи — задай свой порт, который точно открыт."
-        ask "SSH-порт [${SSH_PORT}]"
+        local _suggested="$SSH_PORT"
+        ask "SSH-порт [${_suggested}]"
         read -r _sshport </dev/tty
-        if [[ -n "$_sshport" ]]; then
+        if [[ -n "$_sshport" && "$_sshport" != "$_suggested" ]]; then
+            # port_reserved сверяется в том числе с SSH_PORT, а он уже равен
+            # предложенному значению — без обнуления собственный порт выглядел
+            # бы «занятым сам собой».
+            SSH_PORT=""
             if ! [[ "$_sshport" =~ ^[0-9]+$ ]] || (( _sshport < 1 || _sshport > 65535 )); then
                 die "Некорректный SSH-порт (диапазон 1-65535)"
             fi
             if port_reserved "$_sshport"; then
                 die "Порт $_sshport занят нодой (443/80/${NODE_API_PORT}/${NGINX_FALLBACK_PORT}/${BESZEL_PORT})"
             fi
-            if port_listening "$_sshport"; then
+            # Порт, на котором уже сидит sshd, — законный выбор: у части хостеров
+            # security group пропускает только 22/80/443, и тогда оставить 22
+            # единственный способ не потерять доступ. Чужой процесс — отказ.
+            if port_listening "$_sshport" && ! port_owned_by_sshd "$_sshport"; then
                 die "На порту $_sshport уже кто-то слушает (ss -lntp | grep :$_sshport)"
             fi
             SSH_PORT="$_sshport"
+            if [[ "$SSH_PORT" == "22" ]]; then
+                warn "Порт 22 — дефолтный: брутфорс-боты найдут его сразу. Полагайся"
+                warn "на fail2ban и вход только по ключу (то и другое скрипт настроит)."
+            fi
+        else
+            SSH_PORT="$_suggested"
         fi
         ok "SSH-порт: ${SSH_PORT}"
         warn "ЗАПИШИ ЭТОТ ПОРТ. Он же продублирован в ${NODE_INFO} и в итоговой сводке."
