@@ -100,10 +100,15 @@ if (( DEAD > 0 && DEAD < ${#EXP_PORTS[@]} )); then
     warn "    docker logs remnawave-node --tail 50 | grep '·'"
 fi
 
-if docker ps --filter "name=^remnawave-node$" --filter status=running -q | grep -q .; then
-    pass "контейнер remnawave-node запущен"
-    RESTARTS=$(docker inspect -f '{{.RestartCount}}' remnawave-node 2>/dev/null || echo "?")
-    UPSINCE=$(docker inspect -f '{{.State.StartedAt}}' remnawave-node 2>/dev/null || echo "")
+# Имя контейнера не константа: ноды старых версий подняты как `remnanode`.
+# Определяем по образу, иначе здоровая нода получает ложный FAIL.
+NODE_CONTAINER=$(docker ps --format '{{.Names}}\t{{.Image}}' 2>/dev/null \
+    | grep -iE 'remnawave/node' | head -1 | cut -f1 || true)
+NODE_CONTAINER="${NODE_CONTAINER:-remnawave-node}"
+if docker ps --filter "name=^${NODE_CONTAINER}$" --filter status=running -q | grep -q .; then
+    pass "контейнер ${NODE_CONTAINER} запущен"
+    RESTARTS=$(docker inspect -f '{{.RestartCount}}' "$NODE_CONTAINER" 2>/dev/null || echo "?")
+    UPSINCE=$(docker inspect -f '{{.State.StartedAt}}' "$NODE_CONTAINER" 2>/dev/null || echo "")
     # docker отдаёт UTC, а нода живёт в своей таймзоне — без перевода время
     # контейнера расходится с временем в watchdog.log на несколько часов.
     UPLOCAL=$(date -d "$UPSINCE" '+%F %T %Z' 2>/dev/null || echo "${UPSINCE:-?}")
@@ -120,7 +125,7 @@ if docker ps --filter "name=^remnawave-node$" --filter status=running -q | grep 
     fi
     (( RESTARTS > 5 )) 2>/dev/null && warn "много рестартов (${RESTARTS}) — смотри docker logs remnawave-node"
 else
-    fail "контейнер remnawave-node не запущен"
+    fail "контейнер ${NODE_CONTAINER} не запущен"
 fi
 
 # --- 2. Routing: приватные сети (BLK-1) --------------------------------------

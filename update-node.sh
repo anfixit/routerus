@@ -78,32 +78,59 @@ echo -e "${GREEN}  update-node.sh v3.10 — $(hostname) — $(date '+%F %T %Z')$
 [[ -d "$OPT_DIR" ]] || die "Нет ${OPT_DIR} — это не нода routerus"
 
 # --- Контекст ноды -----------------------------------------------------------
-DOMAIN=""; TRANSPORT=""; XHTTP_PORT=""
+DOMAIN=""
 if [[ -f "${OPT_DIR}/node-info.txt" ]]; then
     DOMAIN=$(awk -F= '/^DOMAIN=/{print $2; exit}' "${OPT_DIR}/node-info.txt")
-    TRANSPORT=$(awk -F= '/^TRANSPORT=/{print $2; exit}' "${OPT_DIR}/node-info.txt")
-    XHTTP_PORT=$(awk -F= '/^XHTTP_PORT=/{print $2; exit}' "${OPT_DIR}/node-info.txt")
 fi
 [[ -z "$DOMAIN" ]] && DOMAIN=$(find /etc/letsencrypt/live -mindepth 1 -maxdepth 1 -type d \
     -printf '%f\n' 2>/dev/null | head -1)
 
-# Транспорт определяем по факту: на нодах версий ≤3.9 node-info.txt нет, а
-# watchdog должен знать, какие порты проверять. Второй inbound виден в UFW.
-if [[ -z "$TRANSPORT" || "$TRANSPORT" == "-" ]]; then
-    XHTTP_PORT=$(ufw status 2>/dev/null \
-        | awk '/Xray Reality XHTTP/{split($1,a,"/"); print a[1]; exit}')
-    if [[ -n "$XHTTP_PORT" ]]; then TRANSPORT="both"; else TRANSPORT="tcp"; fi
-    info "node-info.txt нет — транспорт определён как '${TRANSPORT}' по правилам UFW"
+# Порты inbound берём у того, кто их РЕАЛЬНО слушает, а не из комментариев UFW.
+# Комментарий «Xray Reality XHTTP» старые версии скрипта ставили и на 443 для
+# единственного inbound, из-за чего эвристика по UFW выдавала несуществующий
+# режим both и дублировала порт. Слушающий процесс — источник истины: именно его
+# доступность и проверяет watchdog.
+detect_inbound_ports() {
+    local p
+    # Фильтруем по ПРОЦЕССУ, а не по номеру порта: API ноды держит rw-node,
+    # фолбэк — nginx, и оба отсеиваются сами. Исключать 8443 по номеру нельзя —
+    # на нодах старых версий именно там и живёт сам Xray.
+    p=$(ss -lntpH 2>/dev/null \
+        | grep -E 'rw-core|xray' \
+        | grep -oE '[:.]([0-9]+) ' \
+        | tr -d ':. ' \
+        | sort -un \
+        | tr '\n' ' ' || true)
+    echo "${p% }"
+}
+# Имя контейнера тоже не константа: ноды старых версий поднимали его как
+# `remnanode`, а не `remnawave-node`. Watchdog с зашитым именем считал бы такую
+# ноду вечно мёртвой. Определяем по образу.
+detect_container() {
+    local c
+    c=$(docker ps --format '{{.Names}}\t{{.Image}}' 2>/dev/null \
+        | grep -iE 'remnawave/node' | head -1 | cut -f1 || true)
+    echo "${c:-remnawave-node}"
+}
+NODE_CONTAINER=$(detect_container)
+INBOUND_PORTS=$(detect_inbound_ports)
+if [[ -z "$INBOUND_PORTS" ]]; then
+    # Xray не слушает ничего — либо нода лежит, либо конфиг из панели не пришёл.
+    # Ставим 443 как заведомый минимум, но честно предупреждаем: watchdog будет
+    # проверять предположение, а не факт.
+    INBOUND_PORTS="443"
+    warn "Не нашёл слушающих портов Xray — беру 443 по умолчанию."
+    warn "Если нода сейчас не работает, сначала подними её, потом обнови watchdog."
 fi
-INBOUND_PORTS="443"
-if [[ "$TRANSPORT" == "both" && -n "$XHTTP_PORT" && "$XHTTP_PORT" != "-" ]]; then
-    INBOUND_PORTS="443 ${XHTTP_PORT}"
-fi
-info "Домен: ${DOMAIN:-?} | транспорт: ${TRANSPORT} | inbound: ${INBOUND_PORTS}"
+info "Домен: ${DOMAIN:-?} | контейнер: ${NODE_CONTAINER} | inbound: ${INBOUND_PORTS}"
 
 SSH_PORT=$(awk '/^[[:space:]]*Port[[:space:]]+[0-9]+/{print $2; exit}' \
     /etc/ssh/sshd_config.d/00-hardening.conf 2>/dev/null || true)
-[[ -z "$SSH_PORT" ]] && SSH_PORT=$(sshd -T 2>/dev/null | awk '/^port /{print $2; exit}')
+if [[ -z "$SSH_PORT" ]]; then
+    # `| awk … exit` закрывает пайп раньше времени: источник получает SIGPIPE,
+    # и под `set -o pipefail` это роняет скрипт с кодом 141. Читаем без пайпа.
+    SSH_PORT=$(awk '/^port /{print $2; exit}' <(sshd -T 2>/dev/null) || true)
+fi
 
 # --- IP панели ---------------------------------------------------------------
 if [[ -z "$PANEL_IP" ]]; then
@@ -123,10 +150,11 @@ title "1 / Watchdog: проверка реального inbound (BLK-2)"
 # Версия в шапке watchdog.sh — единственный надёжный признак «файл устарел».
 # Проверять по наличию /dev/tcp мало: нода с watchdog v1 уже содержит эту
 # строку, и обновление до v2 (защита от шторма перезапусков) не доезжало бы.
-WD_VERSION=2
+WD_VERSION=3
 if [[ -f "${OPT_DIR}/watchdog.sh" ]] \
    && grep -q "watchdog-version: ${WD_VERSION}" "${OPT_DIR}/watchdog.sh" \
-   && grep -q "INBOUND_PORTS=\"${INBOUND_PORTS}\"" "${OPT_DIR}/watchdog.sh"; then
+   && grep -q "INBOUND_PORTS=\"${INBOUND_PORTS}\"" "${OPT_DIR}/watchdog.sh" \
+   && grep -q "CONTAINER=\"${NODE_CONTAINER}\"" "${OPT_DIR}/watchdog.sh"; then
     skip "watchdog уже версии ${WD_VERSION} и проверяет ${INBOUND_PORTS} — пропускаю"
 else
     backup_file "${OPT_DIR}/watchdog.sh"
@@ -135,7 +163,7 @@ else
     else
         cat > "${OPT_DIR}/watchdog.sh" << WDEOF
 #!/bin/bash
-# watchdog-version: 2
+# watchdog-version: 3
 # Проверяет РЕАЛЬНЫЙ inbound, а не только наличие контейнера.
 set -uo pipefail
 OPT_DIR="${OPT_DIR}"
@@ -143,6 +171,7 @@ LOG="/var/log/watchdog.log"
 STATE="\${OPT_DIR}/.watchdog_fails"
 PRIMED="\${OPT_DIR}/.watchdog_primed"   # нода хоть раз была полностью здорова
 GAVEUP="\${OPT_DIR}/.watchdog_giveup"   # счётчик безрезультатных рестартов
+CONTAINER="${NODE_CONTAINER}"
 INBOUND_PORTS="${INBOUND_PORTS}"
 FAIL_THRESHOLD=2     # рестарт только после 2 провалов подряд
 MAX_RESTARTS=3       # после стольких безрезультатных — только логировать
@@ -155,8 +184,8 @@ log(){ echo "\$(date '+%F %T') \$*" >> "\$LOG"; }
 alive=1
 reason=""
 
-docker ps --filter "name=^remnawave-node\\\$" --filter status=running -q \\
-    | grep -q . || { alive=0; reason="container down"; }
+docker ps --filter "name=^\${CONTAINER}\\\$" --filter status=running -q \\
+    | grep -q . || { alive=0; reason="container \${CONTAINER} down"; }
 
 if (( alive )); then
     for p in \$INBOUND_PORTS; do
@@ -261,7 +290,7 @@ if [[ "$PANEL_IP" == "skip" ]]; then
 elif [[ "$PANEL_IP" == "any" ]]; then
     warn "PANEL_IP=any — порт ${NODE_API_PORT} остаётся открытым всему интернету"
 elif valid_ipv4 "$PANEL_IP"; then
-    if ufw status 2>/dev/null | grep -qE "^${NODE_API_PORT}/tcp[[:space:]]+ALLOW IN[[:space:]]+Anywhere"; then
+    if ufw status 2>/dev/null | grep -qE "^${NODE_API_PORT}/tcp[[:space:]]+ALLOW( IN)?[[:space:]]+Anywhere"; then
         # ufw delete возвращает ненулевой код, если правило уже снято другим
         # прогоном — под set -e это уронило бы скрипт на ровном месте.
         run ufw delete allow "${NODE_API_PORT}/tcp" || true
@@ -285,8 +314,12 @@ else
 fi
 
 # Beszel: спрашиваем, только если агент реально стоит и порт открыт всем.
-if ufw status 2>/dev/null | grep -qE "^${BESZEL_PORT}/tcp[[:space:]]+ALLOW IN[[:space:]]+Anywhere"; then
-    if [[ -z "$BESZEL_HUB_IP" ]] && [[ "$PANEL_IP" != "skip" ]]; then
+if ufw status 2>/dev/null | grep -qE "^${BESZEL_PORT}/tcp[[:space:]]+ALLOW( IN)?[[:space:]]+Anywhere"; then
+    # Спрашивать можно только при живом терминале. При запуске по ssh без -t
+    # (а именно так скрипт и гоняют по флоту) чтение из /dev/tty роняет прогон
+    # на ровном месте — в этом случае молча пропускаем, значение придёт из
+    # переменной BESZEL_HUB_IP.
+    if [[ -z "$BESZEL_HUB_IP" && "$PANEL_IP" != "skip" ]] && : >/dev/tty 2>/dev/null; then
         info "Порт ${BESZEL_PORT} (Beszel) тоже открыт всем — такой же маркер."
         ask "IP хаба Beszel (Enter — оставить как есть)"
         read -r BESZEL_HUB_IP </dev/tty
@@ -422,10 +455,10 @@ for p in $INBOUND_PORTS; do
         warn "inbound :${p} не отвечает — проверь docker logs remnawave-node"
     fi
 done
-if docker ps --filter "name=^remnawave-node$" --filter status=running -q | grep -q .; then
-    ok "контейнер remnawave-node работает (не пересоздавался)"
+if docker ps --filter "name=^${NODE_CONTAINER}$" --filter status=running -q | grep -q .; then
+    ok "контейнер ${NODE_CONTAINER} работает (не пересоздавался)"
 else
-    warn "контейнер remnawave-node не запущен"
+    warn "контейнер ${NODE_CONTAINER} не запущен"
 fi
 
 # =============================================================================
