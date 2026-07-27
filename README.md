@@ -223,14 +223,23 @@ Censys или Shodan. То же для Beszel на `45876`. Ограничени
 1. **Config Profiles → Create** — вставить JSON из вывода скрипта.
 2. **Nodes → Create** — Address = IP сервера, Port `2222`, привязать профиль,
    включить все inbound, скопировать `SECRET_KEY` обратно в скрипт.
-3. **Hosts → Create** — Address и SNI = домен, Fingerprint `chrome`:
-   - **Flow задавать не нужно** — для VLESS + Reality + TCP панель добавляет
-     `xtls-rprx-vision` автоматически;
-   - `tcp`-хост: Port `443`, ALPN не задавать;
-   - `xhttp`-хост: Port `443` (или `<port>` в режиме `both`), ALPN `h2`;
-   - в режиме `both` создать **два** хоста — по одному на каждый inbound.
+3. **Hosts → Create** — Address и SNI = домен, Fingerprint `chrome`.
+   **Хост создаётся на каждый inbound отдельно**, один хост на два inbound не
+   работает: подписка отдаёт по ссылке на хост.
+   - `tcp`-хост: Port `443`, ALPN не задавать, Flow не задавать — для
+     VLESS + Reality + TCP панель подставит `xtls-rprx-vision` сама;
+   - `xhttp`-хост: Port `443` (или `<port>` в режиме `both`), ALPN `h2`,
+     Path `/api/v1/update`, Mode `packet-up`;
+   - в режиме `both` хостов **два**.
 4. **Internal Squads → Default-Squad** — добавить все inbound ноды
    (без этого нода не попадёт в подписку).
+
+> Скрипт печатает этот чек-лист с уже подставленными доменом, IP, именами
+> inbound и портами — и сохраняет его в `/opt/remnanode/panel-setup.txt`,
+> чтобы не выуживать из прокрутившегося терминала:
+> ```bash
+> cat /opt/remnanode/panel-setup.txt
+> ```
 
 > Проверь готовую ссылку подписки: для tcp-инбаунда в ней должно быть
 > `&flow=xtls-rprx-vision`. Если flow не появился — в Config Profile поменяй

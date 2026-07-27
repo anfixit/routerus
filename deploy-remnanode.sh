@@ -1458,16 +1458,97 @@ JSONEOF
     echo ""
 }
 
+# Сколько хостов нужно создать: по одному на каждый inbound.
+host_count() { [[ "$TRANSPORT" == "both" ]] && echo 2 || echo 1; }
+
+# Шаги 1-2: делаются ДО ввода SECRET_KEY.
+panel_steps_head() {
+    cat << PSEOF
+ШАГ 1. Config Profiles → Create
+    Вставь JSON целиком. Он же лежит на ноде: ${OPT_DIR}/config-profile.json
+    В профиле $(host_count) inbound: $([[ "$TRANSPORT" == "both" ]] \
+        && echo "${NODE_NAME}_tcp и ${NODE_NAME}_xhttp" \
+        || echo "${NODE_NAME}_${TRANSPORT}")
+
+ШАГ 2. Nodes → Create
+    Name:    ${NODE_NAME}
+    Address: ${SERVER_IP}
+    Port:    ${NODE_API_PORT}
+    Привязать созданный профиль и включить в нём ВСЕ inbound.
+    → Скопировать SECRET_KEY и вставить его в скрипт (спросит ниже).
+PSEOF
+}
+
+# Блок описания одного хоста. $1=номер $2=всего $3=tcp|xhttp $4=порт
+host_block() {
+    local n="$1" total="$2" kind="$3" port="$4"
+    echo "    ХОСТ ${n} из ${total} — ${kind^^}"
+    echo "      Inbound:     ${NODE_NAME}_${kind}"
+    echo "      Address:     ${DOMAIN}"
+    echo "      Port:        ${port}"
+    echo "      SNI:         ${DOMAIN}"
+    echo "      Fingerprint: chrome"
+    if [[ "$kind" == "tcp" ]]; then
+        echo "      ALPN:        НЕ задавать"
+        echo "      Flow:        НЕ задавать — панель сама подставит xtls-rprx-vision"
+    else
+        echo "      ALPN:        h2"
+        echo "      Path:        ${XHTTP_PATH}"
+        echo "      Mode:        ${XHTTP_MODE}"
+        echo "      (полей Path/Mode может не быть — тогда они берутся из профиля)"
+    fi
+}
+
+# Шаги 3-5: делаются ПОСЛЕ ввода SECRET_KEY.
+panel_steps_tail() {
+    local total
+    total=$(host_count)
+    echo "ШАГ 3. Hosts → Create"
+    if [[ "$total" == 2 ]]; then
+        echo "    Нужно создать ДВА хоста — отдельный на каждый inbound."
+        echo "    Один хост на оба inbound не работает: подписка отдаёт по"
+        echo "    ссылке на хост, и без второго клиент увидит только tcp."
+    else
+        echo "    Нужно создать один хост — на единственный inbound профиля."
+    fi
+    echo ""
+    case "$TRANSPORT" in
+        both)
+            host_block 1 2 tcp 443
+            echo ""
+            host_block 2 2 xhttp "$XHTTP_PORT"
+            ;;
+        xhttp) host_block 1 1 xhttp 443 ;;
+        *)     host_block 1 1 tcp 443 ;;
+    esac
+    echo ""
+    echo "ШАГ 4. Internal Squads → Default-Squad"
+    if [[ "$TRANSPORT" == "both" ]]; then
+        echo "    Добавить ОБА inbound: ${NODE_NAME}_tcp и ${NODE_NAME}_xhttp"
+    else
+        echo "    Добавить inbound ${NODE_NAME}_${TRANSPORT}"
+    fi
+    echo "    !! Без этого шага нода НЕ попадёт в подписку и не появится в"
+    echo "    клиенте, при том что в панели будет числиться зелёной."
+    echo ""
+    echo "ШАГ 5. Проверка"
+    echo "    Nodes → нода зелёная? Клиент → обновить подписку → пинг есть?"
+    if [[ "$TRANSPORT" == "tcp" || "$TRANSPORT" == "both" ]]; then
+        echo "    В ссылке подписки у tcp должно быть &flow=xtls-rprx-vision."
+        echo "    Если flow не появился — в профиле замени \"network\": \"tcp\""
+        echo "    на \"network\": \"raw\" (в Xray 26.x это одно и то же)."
+    fi
+    if [[ "$TRANSPORT" == "both" ]]; then
+        echo "    Ссылок на эту ноду должно быть ДВЕ: порт 443 и порт ${XHTTP_PORT}."
+    fi
+}
+
 phase10_panel() {
     title "Фаза 10 / Настройка в панели Remnawave"
     echo ""
-    echo -e "${YELLOW}╔══════════════════════════════════════════════════════════════╗${NC}"
-    echo -e "${YELLOW}║  1. Config Profiles → Create — вставь JSON из фазы 9${NC}"
-    echo -e "${YELLOW}║  2. Nodes → Create${NC}"
-    echo -e "${YELLOW}║     Name: ${NODE_NAME} | Address: ${SERVER_IP} | Port: ${NODE_API_PORT}${NC}"
-    echo -e "${YELLOW}║     Привязать профиль, включить все inbound профиля${NC}"
-    echo -e "${YELLOW}║     → Скопируй SECRET_KEY после создания!${NC}"
-    echo -e "${YELLOW}╚══════════════════════════════════════════════════════════════╝${NC}"
+    # Рамка из ╔═╗ ломалась на длинных строках, а чек-лист терялся в логе.
+    # Печатаем плоским текстом и дублируем в файл рядом с нодой.
+    echo -e "${YELLOW}$(panel_steps_head)${NC}"
     echo ""
 
     # Ре-запуск гонял оператора в панель за ключом ноды, которая и так работает,
@@ -1493,32 +1574,23 @@ phase10_panel() {
     fi
 
     echo ""
-    echo -e "${YELLOW}╔══════════════════════════════════════════════════════════════╗${NC}"
-    echo -e "${YELLOW}║  3. Hosts → Create (Fingerprint: chrome, SNI = домен)${NC}"
-    echo -e "${YELLOW}║     Flow НЕ задавать — панель добавит его сама для tcp${NC}"
-
-    if [[ "$TRANSPORT" == "tcp" || "$TRANSPORT" == "both" ]]; then
-        echo -e "${YELLOW}║   • Host TCP:${NC}"
-        echo -e "${YELLOW}║     inbound ${NODE_NAME}_tcp | Address ${DOMAIN} | Port 443${NC}"
-        echo -e "${YELLOW}║     ALPN: не задавать (flow vision добавится автоматически)${NC}"
-    fi
-    if [[ "$TRANSPORT" == "xhttp" ]]; then
-        echo -e "${YELLOW}║   • Host XHTTP (mode ${XHTTP_MODE}, path ${XHTTP_PATH}):${NC}"
-        echo -e "${YELLOW}║     inbound ${NODE_NAME}_xhttp | Address ${DOMAIN} | Port 443${NC}"
-        echo -e "${YELLOW}║     ALPN: h2${NC}"
-    fi
-    if [[ "$TRANSPORT" == "both" ]]; then
-        echo -e "${YELLOW}║   • Host XHTTP (mode ${XHTTP_MODE}, path ${XHTTP_PATH}):${NC}"
-        echo -e "${YELLOW}║     inbound ${NODE_NAME}_xhttp | Address ${DOMAIN} | Port ${XHTTP_PORT}${NC}"
-        echo -e "${YELLOW}║     ALPN: h2${NC}"
-    fi
-
-    echo -e "${YELLOW}║  4. Internal Squads → Default-Squad → добавь ВСЕ inbound${NC}"
-    echo -e "${YELLOW}║     ⚠ Без этого нода не попадёт в подписку!${NC}"
-    echo -e "${YELLOW}║  5. Nodes → нода зелёная? Клиент → обнови → пинг?${NC}"
-    echo -e "${YELLOW}╚══════════════════════════════════════════════════════════════╝${NC}"
+    echo -e "${YELLOW}$(panel_steps_tail)${NC}"
     echo ""
-    info "Проверь в ссылке подписки: для tcp есть &flow=xtls-rprx-vision"
+
+    # Чек-лист в файл: из лога его выуживать неудобно, а нужен он ровно тогда,
+    # когда оператор уже переключился в браузер и терминал прокрутился.
+    local SETUP="${OPT_DIR}/panel-setup.txt"
+    {
+        echo "# Настройка ноды ${NODE_NAME} в панели Remnawave"
+        echo "# Сгенерировано $(date '+%F %T %Z') скриптом v${SCRIPT_VERSION}"
+        echo ""
+        panel_steps_head
+        echo ""
+        panel_steps_tail
+    } > "$SETUP"
+    chmod 600 "$SETUP"
+    ok "Чек-лист сохранён: ${SETUP}"
+    info "Открыть позже: cat ${SETUP}"
     info "Ключи: ${OPT_DIR}/keys.txt | Лог: $LOG_FILE"
     echo ""
 }
@@ -1906,8 +1978,14 @@ NIEOF
     echo -e "${YELLOW}  ⚠ SSH-порт этой ноды — ${SSH_PORT}. Он случайный и НЕ совпадает${NC}"
     echo -e "${YELLOW}    с другими нодами. Занеси его в свой реестр: ${NODE_INFO}${NC}"
     echo ""
-    echo -e "${YELLOW}  ⚠ Заверши настройку в панели Remnawave (см. фазу 10 выше)${NC}"
+    echo -e "${YELLOW}  ⚠ Заверши настройку в панели Remnawave. Чек-лист никуда не делся:${NC}"
+    echo -e "${YELLOW}      cat ${OPT_DIR}/panel-setup.txt${NC}"
+    if [[ "$TRANSPORT" == "both" ]]; then
+        echo -e "${YELLOW}    Не забудь: хостов нужно ДВА (tcp:443 и xhttp:${XHTTP_PORT}),${NC}"
+        echo -e "${YELLOW}    и оба inbound — в Internal Squad.${NC}"
+    fi
     echo ""
+    info "Чек-лист: ${OPT_DIR}/panel-setup.txt"
     info "Ключи:    ${OPT_DIR}/keys.txt"
     info "Инфо:     ${NODE_INFO}"
     info "Лог:      $LOG_FILE (chmod 600, без приватного ключа)"
