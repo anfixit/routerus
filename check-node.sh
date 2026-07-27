@@ -103,8 +103,21 @@ fi
 if docker ps --filter "name=^remnawave-node$" --filter status=running -q | grep -q .; then
     pass "контейнер remnawave-node запущен"
     RESTARTS=$(docker inspect -f '{{.RestartCount}}' remnawave-node 2>/dev/null || echo "?")
-    UPSINCE=$(docker inspect -f '{{.State.StartedAt}}' remnawave-node 2>/dev/null || echo "?")
-    info "рестартов: ${RESTARTS}, запущен с: ${UPSINCE}"
+    UPSINCE=$(docker inspect -f '{{.State.StartedAt}}' remnawave-node 2>/dev/null || echo "")
+    # docker отдаёт UTC, а нода живёт в своей таймзоне — без перевода время
+    # контейнера расходится с временем в watchdog.log на несколько часов.
+    UPLOCAL=$(date -d "$UPSINCE" '+%F %T %Z' 2>/dev/null || echo "${UPSINCE:-?}")
+    info "рестартов: ${RESTARTS}, запущен: ${UPLOCAL}"
+    # --force-recreate обнуляет RestartCount, поэтому шторм перезапусков виден
+    # только в логе watchdog, а не в docker inspect.
+    if [[ -f /var/log/watchdog.log ]]; then
+        RECENT=$(grep -c 'restarting node' /var/log/watchdog.log 2>/dev/null || echo 0)
+        if (( RECENT > 0 )); then
+            info "watchdog перезапускал ноду ${RECENT} раз(а) за всю историю лога"
+            LASTR=$(grep 'restarting node' /var/log/watchdog.log | tail -1 | cut -d' ' -f1-2)
+            info "последний раз: ${LASTR}"
+        fi
+    fi
     (( RESTARTS > 5 )) 2>/dev/null && warn "много рестартов (${RESTARTS}) — смотри docker logs remnawave-node"
 else
     fail "контейнер remnawave-node не запущен"

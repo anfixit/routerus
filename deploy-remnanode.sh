@@ -1826,8 +1826,11 @@ set -uo pipefail
 OPT_DIR="${OPT_DIR}"
 LOG="/var/log/watchdog.log"
 STATE="\${OPT_DIR}/.watchdog_fails"
+PRIMED="\${OPT_DIR}/.watchdog_primed"   # нода хоть раз была полностью здорова
+GAVEUP="\${OPT_DIR}/.watchdog_giveup"   # счётчик безрезультатных рестартов
 INBOUND_PORTS="${INBOUND_PORTS}"
 FAIL_THRESHOLD=2     # рестарт только после 2 провалов подряд
+MAX_RESTARTS=3       # после стольких безрезультатных — только логировать
 
 # Без flock зависший прогон и следующий по крону могли наложиться и пересоздать
 # контейнер дважды.
@@ -1852,6 +1855,9 @@ fi
 
 if (( alive )); then
     echo 0 > "\$STATE"
+    echo 0 > "\$GAVEUP"
+    # Первый полностью здоровый прогон разрешает автолечение.
+    [[ -f "\$PRIMED" ]] || { : > "\$PRIMED"; log "primed: нода здорова, автоперезапуск включён"; }
     exit 0
 fi
 
@@ -1860,8 +1866,28 @@ echo "\$fails" > "\$STATE"
 log "unhealthy: \${reason} (fail \${fails}/\${FAIL_THRESHOLD})"
 (( fails < FAIL_THRESHOLD )) && exit 0
 
-log "restarting node"
+# Нода НИ РАЗУ не была здоровой — идёт первичная настройка. Причина почти
+# всегда в панели (не включены inbound профиля), и пересоздание контейнера её
+# не лечит, зато рвёт те соединения, которые уже работают.
+if [[ ! -f "\$PRIMED" ]]; then
+    log "НЕ перезапускаю: нода ещё ни разу не была здорова — похоже на незавершённую"
+    log "настройку. Проверь в панели Nodes → Edit, что включены ВСЕ inbound профиля."
+    echo 0 > "\$STATE"
+    exit 0
+fi
+
+# Рестарт не помогает — прекращаем дёргать ноду и ждём человека.
+gaveup=\$(cat "\$GAVEUP" 2>/dev/null || echo 0)
+if (( gaveup >= MAX_RESTARTS )); then
+    log "НЕ перезапускаю: \${gaveup} перезапусков подряд не помогли (\${reason})."
+    log "Нужна диагностика: bash check-node.sh"
+    echo 0 > "\$STATE"
+    exit 0
+fi
+
+log "restarting node (попытка \$(( gaveup + 1 ))/\${MAX_RESTARTS})"
 cd "\$OPT_DIR" && docker compose up -d --force-recreate >> "\$LOG" 2>&1
+echo \$(( gaveup + 1 )) > "\$GAVEUP"
 echo 0 > "\$STATE"
 WDEOF
     chmod +x "${OPT_DIR}/watchdog.sh"
