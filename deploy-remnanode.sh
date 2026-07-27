@@ -1461,20 +1461,54 @@ JSONEOF
 # Сколько хостов нужно создать: по одному на каждый inbound.
 host_count() { [[ "$TRANSPORT" == "both" ]] && echo 2 || echo 1; }
 
+# Перечисление тегов inbound через запятую — используется по всему чек-листу.
+inbound_list() {
+    if [[ "$TRANSPORT" == "both" ]]; then
+        echo "${NODE_NAME}_tcp и ${NODE_NAME}_xhttp"
+    else
+        echo "${NODE_NAME}_${TRANSPORT}"
+    fi
+}
+
+# Порты inbound через | — для grep в проверках.
+inbound_ports_re() {
+    if [[ "$TRANSPORT" == "both" ]]; then echo "443|${XHTTP_PORT}"; else echo "443"; fi
+}
+
 # Шаги 1-2: делаются ДО ввода SECRET_KEY.
 panel_steps_head() {
+    local n
+    n=$(host_count)
     cat << PSEOF
 ШАГ 1. Config Profiles → Create
-    Вставь JSON целиком. Он же лежит на ноде: ${OPT_DIR}/config-profile.json
-    В профиле $(host_count) inbound: $([[ "$TRANSPORT" == "both" ]] \
-        && echo "${NODE_NAME}_tcp и ${NODE_NAME}_xhttp" \
-        || echo "${NODE_NAME}_${TRANSPORT}")
+    Вставь JSON ЦЕЛИКОМ. Он же лежит на ноде: ${OPT_DIR}/config-profile.json
+    В профиле ${n} inbound: $(inbound_list)
+    Сверь после вставки, что в панели их тоже ${n}: обрезанный при копировании
+    JSON — частая причина «половина ноды не работает».
 
 ШАГ 2. Nodes → Create
     Name:    ${NODE_NAME}
     Address: ${SERVER_IP}
     Port:    ${NODE_API_PORT}
-    Привязать созданный профиль и включить в нём ВСЕ inbound.
+
+    Привязать созданный профиль. После привязки панель покажет СПИСОК ИНБАУНДОВ
+    этого профиля с переключателями — включить нужно ВСЕ ${n}:
+        $(inbound_list)
+PSEOF
+    if [[ "$TRANSPORT" == "both" ]]; then
+        cat << PSEOF
+
+    !! САМАЯ ЧАСТАЯ ОШИБКА. Нода поднимает ТОЛЬКО отмеченные inbound.
+       Забудешь второй — получишь ровно такую картину:
+         • нода в панели ЗЕЛЁНАЯ (её видно по API-порту ${NODE_API_PORT});
+         • порт 443 при этом мёртв, Xray слушает только ${XHTTP_PORT};
+         • в подписке обе ссылки ведут на один и тот же inbound;
+         • в клиенте пинг n/a.
+       Проверка приведена в ШАГЕ 5 — сделай её, не полагайся на «зелёная».
+PSEOF
+    fi
+    cat << PSEOF
+
     → Скопировать SECRET_KEY и вставить его в скрипт (спросит ниже).
 PSEOF
 }
@@ -1531,16 +1565,42 @@ panel_steps_tail() {
     echo "    !! Без этого шага нода НЕ попадёт в подписку и не появится в"
     echo "    клиенте, при том что в панели будет числиться зелёной."
     echo ""
-    echo "ШАГ 5. Проверка"
-    echo "    Nodes → нода зелёная? Клиент → обновить подписку → пинг есть?"
+    local n ports
+    n=$(host_count)
+    ports=$(inbound_ports_re)
+    echo "ШАГ 5. Проверка НА НОДЕ — обязательно, «зелёная в панели» ничего не значит"
+    echo "    Панель следит только за API-портом ${NODE_API_PORT}. Нода может быть"
+    echo "    зелёной при полностью мёртвом VPN — это её штатное поведение."
+    echo ""
+    echo "    а) Какие inbound нода РЕАЛЬНО получила из панели:"
+    echo "         docker logs remnawave-node --tail 50 | grep '·'"
+    echo "       Ожидается строк: ${n} — по одной на inbound."
+    echo ""
+    echo "    б) Какие порты слушает Xray:"
+    echo "         ss -tlnp | grep -E ':(${ports})'"
+    echo "       Ожидается строк: ${n}."
+    echo ""
+    echo "    Строк меньше, чем ${n}? → вернись к ШАГУ 2: в Nodes включены не все"
+    echo "    inbound профиля. Это чинится в панели, переустанавливать ничего не надо."
+    echo ""
+    echo "    в) Полная диагностика ноды одной командой:"
+    echo "         sudo bash check-node.sh"
+    echo ""
+    echo "ШАГ 6. Проверка в клиенте"
+    echo "    Обновить подписку → включить ноду → открыть любой сайт."
+    if [[ "$TRANSPORT" == "both" ]]; then
+        echo "    Ссылок на эту ноду должно быть ДВЕ: порт 443 и порт ${XHTTP_PORT}."
+        echo "    Обе подписаны одинаково? Значит оба хоста висят на одном inbound —"
+        echo "    вернись к ШАГУ 3 и переключи один из них."
+    fi
     if [[ "$TRANSPORT" == "tcp" || "$TRANSPORT" == "both" ]]; then
         echo "    В ссылке подписки у tcp должно быть &flow=xtls-rprx-vision."
         echo "    Если flow не появился — в профиле замени \"network\": \"tcp\""
         echo "    на \"network\": \"raw\" (в Xray 26.x это одно и то же)."
     fi
-    if [[ "$TRANSPORT" == "both" ]]; then
-        echo "    Ссылок на эту ноду должно быть ДВЕ: порт 443 и порт ${XHTTP_PORT}."
-    fi
+    echo "    Пинг n/a в Happ — сам по себе НЕ признак поломки: на xhttp замер"
+    echo "    задержки часто не отрабатывает при полностью рабочем соединении."
+    echo "    Судить по тому, идёт ли трафик, а не по цифре пинга."
 }
 
 phase10_panel() {

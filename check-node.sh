@@ -56,16 +56,49 @@ echo -e "${GREEN}  check-node.sh — $(hostname) — $(date '+%F %T %Z')${NC}"
 title "1 / Xray inbound (то, что панель НЕ проверяет)"
 # Панель мониторит только API-порт: контейнер жив, 2222 отвечает, нода зелёная,
 # а Xray на 443 мёртв. Именно этот отказ и не ловился до 3.10.
-INBOUND_PORTS="443"
-[[ "$TRANSPORT" == "both" && -n "$XHTTP_PORT" && "$XHTTP_PORT" != "-" ]] \
-    && INBOUND_PORTS="443 ${XHTTP_PORT}"
-for p in $INBOUND_PORTS; do
+#
+# Ожидаемые порты берём из самого профиля, а не из node-info.txt: панель отдаёт
+# ноде ТОЛЬКО те inbound, что отмечены в Nodes → Edit. Профиль может содержать
+# два, а работать будет один — и нода при этом останется зелёной.
+PROFILE="${OPT_DIR}/config-profile.json"
+declare -a EXP_PORTS=() EXP_TAGS=()
+if [[ -f "$PROFILE" ]] && command -v jq >/dev/null 2>&1; then
+    mapfile -t EXP_PORTS < <(jq -r '.inbounds[].port' "$PROFILE" 2>/dev/null || true)
+    mapfile -t EXP_TAGS  < <(jq -r '.inbounds[].tag'  "$PROFILE" 2>/dev/null || true)
+fi
+if (( ${#EXP_PORTS[@]} == 0 )); then
+    # Профиля нет (нода от версии ≤3.9) — падаем на node-info.txt.
+    EXP_PORTS=(443)
+    EXP_TAGS=("inbound")
+    if [[ "$TRANSPORT" == "both" && -n "$XHTTP_PORT" && "$XHTTP_PORT" != "-" ]]; then
+        EXP_PORTS=(443 "$XHTTP_PORT")
+        EXP_TAGS=("tcp" "xhttp")
+    fi
+fi
+
+info "В профиле inbound: ${#EXP_PORTS[@]} (${EXP_TAGS[*]})"
+DEAD=0
+for i in "${!EXP_PORTS[@]}"; do
+    p="${EXP_PORTS[$i]}"
+    t="${EXP_TAGS[$i]:-inbound}"
     if timeout 5 bash -c "exec 3<>/dev/tcp/127.0.0.1/${p}" 2>/dev/null; then
-        pass "inbound :${p} принимает соединения"
+        pass "inbound ${t} :${p} принимает соединения"
     else
-        fail "inbound :${p} НЕ отвечает — VPN не работает, панель об этом молчит"
+        fail "inbound ${t} :${p} НЕ отвечает — этот inbound не работает"
+        DEAD=$((DEAD + 1))
     fi
 done
+
+# Часть портов жива, часть мертва — почти всегда это не сбой Xray, а невключённый
+# inbound в панели. Отдельная подсказка, потому что симптом («нода зелёная, но
+# половина ссылок не работает») сам по себе на причину не указывает.
+if (( DEAD > 0 && DEAD < ${#EXP_PORTS[@]} )); then
+    warn "Работает не весь профиль: ${DEAD} из ${#EXP_PORTS[@]} inbound молчат."
+    warn "Самая частая причина — в панели Nodes → Edit включены НЕ ВСЕ inbound"
+    warn "профиля. Нода поднимает только отмеченные, оставаясь зелёной."
+    warn "Что реально получено из панели:"
+    warn "    docker logs remnawave-node --tail 50 | grep '·'"
+fi
 
 if docker ps --filter "name=^remnawave-node$" --filter status=running -q | grep -q .; then
     pass "контейнер remnawave-node запущен"
@@ -79,7 +112,6 @@ fi
 
 # --- 2. Routing: приватные сети (BLK-1) --------------------------------------
 title "2 / Config Profile: приватные сети"
-PROFILE="${OPT_DIR}/config-profile.json"
 if [[ -f "$PROFILE" ]] && command -v jq >/dev/null 2>&1; then
     # Профиль на ноде — только копия для оператора; источник истины в панели.
     # Но если здесь ещё лежит geoip:private→DIRECT, в панели почти наверняка
