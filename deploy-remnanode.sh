@@ -1961,11 +1961,24 @@ phase14_ufw() {
     # `fail2ban-client status sshd` показывает «enabled», а `iptables -S | grep
     # f2b` — пусто, то есть защиты нет вообще (H-4).
     systemctl restart fail2ban 2>/dev/null || true
-    sleep 1
+    sleep 2
+    local f2b_action
+    f2b_action=$(fail2ban-client get sshd actions 2>/dev/null \
+        | grep -oiE '(nftables|iptables)[a-z0-9-]*' | head -1)
     if iptables -S 2>/dev/null | grep -q 'f2b-'; then
-        ok "fail2ban перезапущен, цепочки f2b-* на месте"
+        ok "fail2ban перезапущен, цепочки f2b-* на месте (iptables)"
+    elif [[ "$f2b_action" == nftables* ]]; then
+        # Действие nftables создаёт таблицу f2b-table при первом бане, а не при
+        # старте. Её отсутствие на свежей ноде — норма. Здесь же и причина, по
+        # которой H-4 на nftables не воспроизводится: таблица fail2ban своя,
+        # `ufw reset` её не затрагивает.
+        if fail2ban-client status sshd >/dev/null 2>&1; then
+            ok "fail2ban перезапущен, джейл sshd активен (banaction=${f2b_action})"
+        else
+            warn "Джейл sshd не отвечает — проверь: fail2ban-client status sshd"
+        fi
     else
-        warn "Цепочек f2b-* нет в iptables — проверь: fail2ban-client status sshd"
+        warn "Правил f2b не видно (banaction=${f2b_action:-?}) — проверь: fail2ban-client status sshd"
     fi
 }
 

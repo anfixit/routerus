@@ -190,18 +190,27 @@ if systemctl is-active --quiet fail2ban; then
         nft list ruleset 2>/dev/null | grep -qi 'f2b' && F2B_WHERE="nftables"
     fi
     JAILED=$(fail2ban-client status sshd 2>/dev/null || true)
-    if [[ -n "$F2B_WHERE" ]]; then
-        BANNED=$(awk -F': *' '/Currently banned/{print $2}' <<< "$JAILED")
-        pass "цепочки f2b-* на месте (${F2B_WHERE}, в бане сейчас: ${BANNED:-0})"
-    elif [[ -z "$JAILED" ]]; then
+    BANNED=$(awk -F': *' '/Currently banned/{print $2}' <<< "$JAILED" | tr -d '[:space:]')
+    F2B_ACTION=$(fail2ban-client get sshd actions 2>/dev/null \
+        | grep -oiE '(nftables|iptables)[a-z0-9-]*' | head -1)
+
+    if [[ -z "$JAILED" ]]; then
         fail "джейл sshd не отвечает — fail2ban не защищает SSH"
         info "чинится так: systemctl restart fail2ban && fail2ban-client status sshd"
+    elif [[ -n "$F2B_WHERE" ]]; then
+        pass "правила f2b на месте (${F2B_WHERE}, в бане сейчас: ${BANNED:-0})"
+    elif [[ "$F2B_ACTION" == nftables* && "${BANNED:-0}" == "0" ]]; then
+        # Действие nftables создаёт таблицу f2b-table лениво, при первом бане.
+        # Её отсутствие при нуле забаненных — нормальная работа, а не поломка.
+        # Заодно: H-4 (ufw reset сносит цепочки) на nftables не воспроизводится —
+        # у fail2ban своя таблица, ufw её не трогает.
+        pass "джейл sshd активен, banaction=${F2B_ACTION} (в бане: 0)"
+        info "таблица f2b создаётся при первом бане — сейчас её отсутствие штатно"
     else
-        # Джейл жив, но правил не видно ни там, ни там. Чаще всего это ufw reset,
-        # снёсший цепочки, о чём fail2ban не узнаёт до своего рестарта (H-4).
-        fail "джейл sshd запущен, но правил нет ни в iptables, ни в nftables (H-4)"
+        # Джейл жив, есть баны, но правил не видно — вот это уже H-4: ufw reset
+        # снёс цепочки, а fail2ban об этом не узнает до своего рестарта.
+        fail "джейл запущен (в бане ${BANNED:-?}), но правил нет — banaction=${F2B_ACTION:-?} (H-4)"
         info "чинится так: systemctl restart fail2ban"
-        info "banaction: $(fail2ban-client get sshd actions 2>/dev/null | tr '\n' ' ')"
     fi
 else
     fail "служба fail2ban не активна"

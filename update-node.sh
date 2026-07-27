@@ -309,17 +309,28 @@ title "4 / fail2ban: восстановление цепочек (H-4)"
 # ufw reset/enable перестраивает filter-таблицу своим набором, в котором цепочек
 # f2b-* нет. Fail2ban об этом не узнаёт до собственного рестарта: джейл
 # рапортует «enabled», а в iptables пусто — то есть защиты нет вообще.
+F2B_ACTION=$(fail2ban-client get sshd actions 2>/dev/null \
+    | grep -oiE '(nftables|iptables)[a-z0-9-]*' | head -1)
+F2B_BANNED=$(fail2ban-client status sshd 2>/dev/null \
+    | awk -F': *' '/Currently banned/{print $2}' | tr -d '[:space:]')
 if iptables -S 2>/dev/null | grep -q 'f2b-'; then
-    skip "цепочки f2b-* уже на месте"
+    skip "цепочки f2b-* уже на месте (iptables)"
+elif command -v nft >/dev/null 2>&1 && nft list ruleset 2>/dev/null | grep -qi 'f2b'; then
+    skip "правила f2b уже на месте (nftables)"
+elif [[ "$F2B_ACTION" == nftables* && "${F2B_BANNED:-0}" == "0" ]]; then
+    # nftables-действие создаёт таблицу при первом бане. Пустая таблица при нуле
+    # забаненных — норма, а не следствие ufw reset: у fail2ban своя таблица,
+    # которую ufw не трогает, поэтому H-4 здесь не воспроизводится.
+    skip "banaction=${F2B_ACTION}, в бане 0 — таблица создастся при первом бане"
 else
-    warn "цепочек f2b-* нет в iptables — джейл 'enabled', но правил нет"
+    warn "правил f2b нет, в бане ${F2B_BANNED:-?} (banaction=${F2B_ACTION:-?})"
     run systemctl restart fail2ban
     (( DRY_RUN )) || sleep 2
-    if (( DRY_RUN )) || iptables -S 2>/dev/null | grep -q 'f2b-'; then
-        ok "fail2ban перезапущен, цепочки восстановлены"
-        note "восстановлены цепочки fail2ban (защита SSH реально не работала)"
+    if (( DRY_RUN )) || fail2ban-client status sshd >/dev/null 2>&1; then
+        ok "fail2ban перезапущен, джейл sshd отвечает"
+        note "перезапущен fail2ban (правила бана не были применены)"
     else
-        warn "цепочки так и не появились — проверь: fail2ban-client status sshd"
+        warn "джейл так и не поднялся — проверь: fail2ban-client status sshd"
     fi
 fi
 
