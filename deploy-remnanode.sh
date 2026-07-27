@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # =============================================================================
-# deploy-remnanode.sh v3.9
+# deploy-remnanode.sh v3.10
 # VLESS + Reality + (TCP/Vision | XHTTP | BOTH) + steal_oneself
 #
 # Разворачивает remnawave-node на чистом Ubuntu 24.04.
@@ -10,91 +10,119 @@
 #   wget -O deploy.sh https://raw.githubusercontent.com/anfixit/routerus/main/deploy-remnanode.sh
 #   bash deploy.sh
 #
-# Changelog v3.9 (UX + аудит, все замечания включая минорные):
-#   - NEW: выбор транспорта цифрой 1/2/3 (tcp/xhttp/both), слова тоже приняты.
-#   - NEW: примеры получения SSH-ключа для macOS/Linux и Windows
-#     (PowerShell + cmd.exe), а не только для мака.
-#   - SEC: Docker ставится из официального apt-репозитория с проверкой
-#     GPG-подписи пакетов (было `curl … | sh` без верификации). Заодно
-#     гарантирует docker compose v2 (плагин docker-compose-plugin).
-#   - FIX: проверка, что :443 свободен, ДО деплоя (только на первичной
-#     установке — на ре-запуске порт держит сама нода, это норма).
-#   - FIX: парсинг x25519 берёт первую строку (head -1) — будущий формат
-#     вывода Xray с лишними «private»-строками не сломает JSON.
-#   - FIX: fallback-цепочка keygen пробует для каждого образа оба вызова
-#     (`xray x25519` и `x25519`), а не хардкод `teddysun … xray x25519`.
-#   - FIX: check_internet не маскирует недоступность GitHub ICMP-пингом —
-#     результат curl/wget теперь авторитетен; ping лишь при отсутствии обоих.
-#   - FIX: старт контейнера проверяется поллингом (до 30с), а не слепым sleep.
-#   - CHG: 45876 (Beszel) добавлен в список занятых портов (коллизия xhttp).
-#   - COSMETIC: выровнены рамки вывода JSON-профиля (левая граница).
+# Для УЖЕ развёрнутых нод правки этой версии накатывает update-node.sh,
+# а состояние ноды показывает check-node.sh (оба в этом же репозитории).
+#
+# Changelog v3.10 (аудит: 3 блокера, 6 высоких, 10 средних, 16 минорных):
+#   - BLK-1(crit): routing больше НЕ отдаёт приватные сети в DIRECT. Правило
+#     geoip:private→DIRECT кодифицировало SSRF с ноды: клиент мог указать в
+#     VLESS-заголовке 169.254.169.254 (cloud-metadata), 10/8 (внутренняя сеть
+#     хостера) или 127.0.0.1:2222 (node API в обход UFW). Теперь явный список
+#     CIDR → BLOCK. domainStrategy IPIfNonMatch сохранён: он резолвит домен ДО
+#     проверки IP-правил, иначе evil.example.com→169.254.169.254 прошёл бы мимо.
+#   - BLK-2(crit): watchdog проверяет РЕАЛЬНЫЙ inbound (коннект на 443, в режиме
+#     both — и на xhttp-порт), а не только наличие контейнера. Прежний
+#     `docker ps | grep` молчал в самом частом сценарии: контейнер жив, API 2222
+#     отвечает, панель зелёная, Xray мёртв. Плюс порог в 2 провала подряд
+#     (кратковременный up -d не даёт рестарт-петлю) и flock от наложения.
+#   - BLK-3: geo-машинерия убрана целиком. Единственным её потребителем было
+#     правило geoip:private, заменённое явными CIDR; geosite-правил в конфиге
+#     нет, а образ ноды несёт собственные .dat. Ушли: ночной cron, ежедневный
+#     --force-recreate всего флота из-за обновления runetfreedom, зависимость
+#     деплоя от доступности GitHub. Заодно задаётся таймзона (было: cron в UTC
+#     при расчёте «на МСК»).
+#   - H-1: 2222 (node API) и 45876 (Beszel) больше не открыты всему интернету —
+#     UFW пускает только с IP панели и хаба. Открытый 2222 с характерным
+#     TLS-ответом Remnawave был маркером, по которому одна опознанная нода
+#     выдавала остальные сканом IPv4.
+#   - H-2: sniffing routeOnly=true. Без него подслушанный SNI подменял адрес
+#     назначения → двойной резолв на соединение и потеря CDN-локальности.
+#     Мёртвый quic из destOverride убран (UDP/443 блокируется правилом выше).
+#   - H-3: DNS клиентов больше не уходит на фильтрующий сторонний резолвер.
+#   - H-4: fail2ban перезапускается ПОСЛЕ ufw reset — иначе цепочки f2b-*
+#     не восстанавливались и джейл «включён» без единого правила в iptables.
+#   - H-5: authorized_keys дополняется, а не перезаписывается (ре-запуск больше
+#     не сносит второй ключ — ноутбука, коллеги, CI).
+#   - H-6: явная пауза на подтверждение SSH-доступа до продолжения. Раньше
+#     опечатка в ключе обнаруживалась через 15 минут, после выхода из сессии.
+#   - SEC: SSH-порт случайный на ноду (был константой на всём флоте = маркер),
+#     переиспользуется при ре-запуске. Лендинг рандомизируется по структуре,
+#     а не только по палитре: число и порядок карточек, секции, шрифты, CSS,
+#     robots.txt/favicon/вторая страница.
+#   - M: set -E (ERR-trap не работал ни разу — весь код в функциях), валидация
+#     домена, идемпотентная генерация ключей (ре-запуск больше не печатает НОВЫЙ
+#     профиль, вставка которого рвала всех клиентов ноды), условный ufw reset,
+#     jq-мёрдж daemon.json + рестарт docker только при реальном изменении,
+#     сохранение пина образа из существующего compose, переиспользование
+#     SECRET_KEY из .env, дроп-ин unattended-upgrades вместо затирания
+#     дистрибутивного, проверка срока сертификата вместо факта наличия.
+#   - L: nf_conntrack_max переживает ребут, cli.ini не навязывается всему хосту,
+#     logrotate для логов ноды, visudo -cf, проверка эффективного конфига sshd,
+#     admin добавляется в docker при повторном запуске, валидация ключа через
+#     ssh-keygen, проверка занятости xhttp-порта, предупреждение об уникальности
+#     тегов, внятная ошибка без /dev/tty, лог дописывается до конца.
+# Changelog v3.9 (UX + аудит):
+#   - выбор транспорта цифрой 1/2/3, SSH-примеры для Windows, Docker из
+#     подписанного apt-репозитория, проверка свободного :443, head -1 в парсинге
+#     ключа, check_internet без ICMP-маскировки, поллинг старта контейнера.
 # Changelog v3.8 (аудит безопасности + устойчивость деплоя):
-#   - FIX(crit): приватный ключ Reality больше не попадает в лог — Config
-#     Profile JSON пишется в /opt/remnanode/config-profile.json (600) и на
-#     терминал, минуя tee. Раньше JSON с privateKey уходил в /var/log.
-#   - FIX(crit): SSH-хардинг в 00-hardening.conf (был hardening.conf). sshd
-#     берёт ПЕРВОЕ значение ключа, а 50-cloud-init.conf сортировался раньше и
-#     оставлял PasswordAuthentication yes. Плюс явное гашение пароля в cloud-init.
-#   - FIX(crit): nginx-fallback больше не публичен — listen 127.0.0.1 и порт
-#     8443 убран из UFW (Reality ходит на него по loopback; прямой коннект без
-#     proxy_protocol давал аномалию = фингерпринт).
-#   - FIX: phase2 не виснет — NEEDRESTART_MODE=a + ожидание cloud-init +
-#     DPkg::Lock::Timeout; -q вместо -qq (виден прогресс). +python3-systemd.
-#   - FIX: продление сертификата пересоздаёт ноду (renewal-hook, --force-recreate):
-#     live/ — симлинк, docker пинует старый inode, нода отдавала истёкший cert.
-#   - FIX: обязательный geoip.dat проверяется в phase11 (die), geosite —
-#     опционален и монтируется условно; больше нет битого контейнера при сбое GitHub.
-#   - FIX: update-geo.sh — up -d --force-recreate вместо restart.
-#   - FIX: Beszel — том не сносится (сохраняется fingerprint агента).
-#   - NEW: REMNANODE_IMAGE — образ ноды пинуется env-переменной.
-#   - CHG: bittorrent → BLOCK (было DIRECT): раздача с IP ноды = DMCA/абузы
-#     провайдера. Sniffing уже включён, торрент-трафик отсекается на ноде.
+#   - privateKey не в лог, SSH-хардинг в 00-hardening.conf, nginx-fallback
+#     только на loopback, фикс зависания phase2, renewal пересоздаёт ноду,
+#     bittorrent → BLOCK, пин образа REMNANODE_IMAGE.
 # Changelog v3.7 (аудит + актуализация транспорта):
-#   - FIX(crit): фейковый сайт получает chmod 644/755 — под umask 077 он
-#     создавался 600 root и nginx-воркер (www-data) отдавал 403 вместо
-#     лендинга, ломая steal_oneself ровно там, где он нужен.
-#   - FIX: SSH — mask ssh.socket (не disable): apt upgrade больше не воскрешает
-#     сокет на :22, из-за которого рвались коннекты. + sshd -t перед рестартом.
-#   - FIX: SSL без даунтайма nginx — issuance и renewal через webroot,
-#     nginx на :80 держит ACME постоянно (раньше certbot гасил nginx =
-#     детектируемая дыра в steal_oneself на время продления).
-#   - FIX: update-geo — валидация размера перед подменой live-файла и рестарт
-#     ноды ТОЛЬКО при реальном изменении (битый .dat больше не роняет Xray,
-#     недоступность GitHub не даёт ночной пустой рестарт).
-#   - FIX: NODE_NAME санитизируется (JSON-инъекция), xhttp-порт проверяется на
-#     коллизию с занятыми портами, IP при неудаче автодетекта спрашивается.
-#   - FIX: SSH_PORT — единая readonly-константа вместо 6 литералов.
-#   - FIX: apt upgrade только при первичной установке (защита живой ноды при
-#     идемпотентном ре-запуске); парсинг ключей терпим к Xray 26.x (Password).
-#   - NEW: XHTTP mode=packet-up + api-образный path — устойчивее к поведенческому
-#     анализу мобильного ТСПУ (МТС/Мегафон) в РФ-2026.
-# Changelog v3.6:
-#   - транспорт both (tcp:443 + xhttp:<port>), UFW сам открывает xhttp-порт
-# Changelog v3.5 (аудит безопасности):
-#   - лог 600, приватный ключ не в лог, Beszel hub не захардкожен, getent,
-#     fail2ban systemd, бэкапы конфигов, HTTPS-проверка сети
+#   - chmod фейк-сайта (фикс 403), mask ssh.socket, zero-downtime SSL (webroot),
+#     санитизация имени ноды, XHTTP mode=packet-up.
+# Changelog v3.6: транспорт both (tcp:443 + xhttp:<port>).
+# Changelog v3.5: лог 600, ключи не в лог, hub не захардкожен, бэкапы конфигов.
 # =============================================================================
 
-set -euo pipefail
+# -E обязателен: без errtrace ERR-trap НЕ наследуется функциями, а весь код
+# живёт в phaseN_*. До 3.10 trap не срабатывал ни разу, и падение выглядело
+# как молчаливый обрыв вывода.
+set -Eeuo pipefail
 
 # --- Константы (единый источник истины) --------------------------------------
-readonly SCRIPT_VERSION="3.9"
+readonly SCRIPT_VERSION="3.10"
 readonly LOG_FILE="/var/log/deploy-remnanode.log"
-readonly SSH_PORT=2810
 readonly NODE_API_PORT=2222
 readonly NGINX_FALLBACK_PORT=8443
+readonly BESZEL_PORT=45876
 readonly WEBROOT="/var/www/html"
 readonly OPT_DIR="/opt/remnanode"
-readonly GEO_DIR="${OPT_DIR}/geodata"
 readonly STATE_MARKER="${OPT_DIR}/.deployed"   # флаг «уже разворачивали»
-readonly GEO_MIN_SIZE=100000                   # <100КБ = битый/HTML-ошибка
-readonly GEO_BASE_URL="https://raw.githubusercontent.com/runetfreedom/russia-v2ray-rules-dat/release"
+readonly NODE_INFO="${OPT_DIR}/node-info.txt"  # шпаргалка по ноде для оператора
+
+# SSH-порт выбирается случайно НА НОДУ. Константа на всём флоте (была 2810) —
+# сильный признак кластеризации: одна опознанная нода выдавала остальные
+# поиском по редкому порту в Censys/Shodan. На ре-запуске порт читается из
+# уже написанного дроп-ина sshd, чтобы доступ не потерялся.
+readonly SSH_PORT_MIN=20000
+readonly SSH_PORT_MAX=60000
+SSH_PORT=""
+
+# Таймзона ноды. Свежая Ubuntu = UTC, из-за чего «ночной» крон приходился на
+# утро по МСК. Задаётся явно, чтобы расписание и логи читались однозначно.
+readonly NODE_TZ="${NODE_TZ:-Europe/Moscow}"
+
+# Приватные и служебные диапазоны, недостижимые для клиента через ноду (BLK-1).
+# Явный список вместо geoip:private — не требует geoip.dat, значит не требует
+# и его ночного обновления с рестартом контейнера.
+readonly PRIVATE_CIDRS='"0.0.0.0/8","10.0.0.0/8","100.64.0.0/10","127.0.0.0/8","169.254.0.0/16","172.16.0.0/12","192.0.0.0/24","192.168.0.0/16","198.18.0.0/15","224.0.0.0/4","240.0.0.0/4","::1/128","fc00::/7","fe80::/10"'
+
+# DNS для резолва на ноде. Нефильтрующий: фильтрующий сторонний резолвер, во-первых,
+# делает передачу доменных запросов клиентов третьей стороне раскрываемым фактом
+# для Политики конфиденциальности, во-вторых, ломает краш-репортинг и A/B-конфиги
+# мобильных приложений — пользователь приходит в поддержку, а связь с VPN не строит.
+# Блокировка рекламы осталась в routing (по домену), она от резолвера не зависит.
+readonly DNS_SERVER="${DNS_SERVER:-https://1.1.1.1/dns-query}"
 
 # Образ для генерации x25519. Пинуется env-переменной для воспроизводимости.
 readonly XRAY_KEYGEN_IMAGE="${XRAY_KEYGEN_IMAGE:-ghcr.io/xtls/xray-core:latest}"
 
-# Образ ноды. Пинуй тег для воспроизводимости: REMNANODE_IMAGE=remnawave/node:2.8.0
-readonly REMNANODE_IMAGE="${REMNANODE_IMAGE:-remnawave/node:latest}"
+# Образ ноды. Пустой = взять тег из существующего compose (ре-запуск не должен
+# молча апгрейдить ядро на живой ноде), при первичной установке — :latest.
+REMNANODE_IMAGE="${REMNANODE_IMAGE:-}"
+readonly REMNANODE_IMAGE_DEFAULT="remnawave/node:latest"
 
 # Email для Let's Encrypt (пустой → регистрация без email).
 readonly CERTBOT_EMAIL="${CERTBOT_EMAIL:-}"
@@ -106,10 +134,8 @@ readonly XHTTP_PATH="/api/v1/update"
 
 # Значения по умолчанию, переопределяемые в phase1.
 XHTTP_PORT=8444
-
-# Порты, занятые самой нодой (для проверки коллизий xhttp).
-# 45876 — Beszel agent (phase16, опционален, но резервируем заранее).
-readonly RESERVED_PORTS=(443 80 "$SSH_PORT" "$NODE_API_PORT" "$NGINX_FALLBACK_PORT" 45876)
+PANEL_IP=""
+BESZEL_HUB_IP=""
 
 # --- Цвета и вывод ------------------------------------------------------------
 RED='\033[0;31m'; GREEN='\033[0;32m'; YELLOW='\033[1;33m'
@@ -125,12 +151,27 @@ ask()   { echo -ne "${YELLOW}  ▸ $1: ${NC}"; }
 # Печать секрета только на терминал, минуя tee-лог.
 secret() { echo -e "${GREEN}  $1${NC}" >/dev/tty; }
 
+# --- Терминал обязателен (L-12) ----------------------------------------------
+# Все вопросы читаются из /dev/tty. Без терминала (`ssh host 'bash -s' < deploy.sh`
+# без -t) скрипт падал неинформативно на первом же read.
+if ! : >/dev/tty 2>/dev/null; then
+    echo "deploy-remnanode.sh: нужен терминал — все вопросы читаются из /dev/tty." >&2
+    echo "Запусти на сервере напрямую, либо: ssh -t root@IP 'bash -s' < deploy.sh" >&2
+    exit 1
+fi
+
 # --- Лог (не мир-читаемый: в него уходит весь stdout) ------------------------
 umask 077
 touch "$LOG_FILE"
 chmod 600 "$LOG_FILE"
 exec > >(tee -a "$LOG_FILE") 2>&1
 
+# tee — отдельный процесс; без ожидания хвост лога терялся при выходе (L-13).
+_flush_log() {
+    exec 1>&- 2>&- || true
+    wait 2>/dev/null || true
+}
+trap _flush_log EXIT
 trap 'echo -e "${RED}  ✖ Ошибка на строке $LINENO (код $?)${NC}" >/dev/tty' ERR
 
 # --- Утилиты -----------------------------------------------------------------
@@ -142,10 +183,9 @@ backup_file() {
 }
 
 check_internet() {
-    # GitHub нужен дальше в любом случае (geo, apt-репо Docker), потому проверяем
-    # именно его достижимость по HTTPS, а не «интернет вообще».
-    # Если HTTP-клиент есть — его результат авторитетен: недоступность GitHub
-    # НЕ маскируется ICMP-пингом (раньше ping мог дать ложный «сеть есть»).
+    # GitHub нужен дальше (apt-репо Docker), потому проверяем именно его
+    # достижимость по HTTPS, а не «интернет вообще». Если HTTP-клиент есть —
+    # его результат авторитетен: недоступность НЕ маскируется ICMP-пингом.
     if command -v curl >/dev/null 2>&1; then
         curl -fsS --max-time 6 https://api.github.com >/dev/null 2>&1
         return
@@ -169,16 +209,60 @@ get_server_ip() {
     if [[ -z "$ip" ]] && command -v wget >/dev/null 2>&1; then
         ip=$(wget -qO- --timeout=6 https://ifconfig.me 2>/dev/null) || true
     fi
-    echo "$ip"
+    echo "$ip" | tr -d '[:space:]'
+}
+
+valid_ipv4() {
+    local ip="$1" o x
+    [[ "$ip" =~ ^([0-9]{1,3}\.){3}[0-9]{1,3}$ ]] || return 1
+    IFS='.' read -ra o <<< "$ip"
+    for x in "${o[@]}"; do (( x <= 255 )) || return 1; done
+    return 0
 }
 
 port_reserved() {
-    # 0, если порт входит в список занятых нодой.
+    # 0, если порт уже занят самой нодой. SSH_PORT участвует, только когда
+    # уже выбран (порядок: сначала SSH, потом xhttp).
     local p="$1" r
-    for r in "${RESERVED_PORTS[@]}"; do
-        [[ "$p" == "$r" ]] && return 0
+    for r in 443 80 "$NODE_API_PORT" "$NGINX_FALLBACK_PORT" "$BESZEL_PORT" "${SSH_PORT:-}"; do
+        [[ -n "$r" && "$p" == "$r" ]] && return 0
     done
     return 1
+}
+
+port_listening() {
+    # 0, если на порту реально кто-то слушает (L-10).
+    ss -lntH 2>/dev/null | awk '{print $4}' | grep -qE "[:.]${1}\$"
+}
+
+rand_int() {
+    # Равномерное целое в [$1;$2]. RANDOM даёт максимум 32767 — для диапазона
+    # SSH-портов этого не хватает, потому берём 4 байта из urandom.
+    local lo="$1" hi="$2" span r
+    span=$(( hi - lo + 1 ))
+    r=$(od -An -N4 -tu4 < /dev/urandom | tr -d ' ')
+    echo $(( lo + r % span ))
+}
+
+pick_ssh_port() {
+    # Уже настроенная нода: берём порт из своего дроп-ина, иначе ре-запуск
+    # сменил бы порт и запер оператора снаружи.
+    local existing p tries=0
+    existing=$(awk '/^[[:space:]]*Port[[:space:]]+[0-9]+/{print $2; exit}' \
+        /etc/ssh/sshd_config.d/00-hardening.conf 2>/dev/null || true)
+    if [[ "$existing" =~ ^[0-9]+$ ]]; then
+        echo "$existing"
+        return 0
+    fi
+    while (( tries++ < 100 )); do
+        p=$(rand_int "$SSH_PORT_MIN" "$SSH_PORT_MAX")
+        port_reserved "$p" && continue
+        port_listening "$p" && continue
+        echo "$p"
+        return 0
+    done
+    # Практически недостижимо, но пусть будет детерминированный исход.
+    echo 2810
 }
 
 # Сгенерировать x25519 через заданный образ. Пробуем оба стиля вызова:
@@ -189,21 +273,6 @@ xray_x25519() {
         || docker run --rm "$img" x25519 2>/dev/null
 }
 
-# Скачать один geo-файл с валидацией размера. Возвращает 0 при успехе.
-# $1=имя_файла $2=url. Кладёт результат в $GEO_DIR/$1.
-fetch_geo() {
-    local url="$2" dst="${GEO_DIR}/$1"
-    if wget -q --timeout=60 --tries=3 "$url" -O "${dst}.tmp" \
-        && [[ -s "${dst}.tmp" ]] \
-        && (( $(stat -c%s "${dst}.tmp") >= GEO_MIN_SIZE )); then
-        mv "${dst}.tmp" "$dst"
-        chmod 644 "$dst"          # контейнер читает bind-mount :ro
-        return 0
-    fi
-    rm -f "${dst}.tmp"
-    return 1
-}
-
 # =============================================================================
 phase0_checks() {
     title "Фаза 0 / Проверки"
@@ -211,17 +280,21 @@ phase0_checks() {
     ok "root"
     # shellcheck disable=SC1091
     source /etc/os-release 2>/dev/null || die "Не читается /etc/os-release"
+    # Без явной проверки отсутствующий VERSION_ID под set -u давал unbound
+    # variable вместо внятной ошибки (L-14).
+    if [[ -z "${ID:-}" || -z "${VERSION_ID:-}" ]]; then
+        die "В /etc/os-release нет ID/VERSION_ID — дистрибутив не опознан"
+    fi
     if [[ "$ID" != "ubuntu" || "${VERSION_ID%%.*}" -lt 24 ]]; then
-        die "Нужна Ubuntu 24.04+, у тебя $PRETTY_NAME"
+        die "Нужна Ubuntu 24.04+, у тебя ${PRETTY_NAME:-$ID $VERSION_ID}"
     fi
     ok "Ubuntu $VERSION_ID"
     check_internet || die "Нет доступа к сети (проверил HTTPS к api.github.com)"
     ok "Сеть доступна"
     # На первичной установке 443 должен быть свободен: иначе Xray внутри
-    # контейнера тихо упадёт на bind в phase12. На ре-запуске порт держит
-    # сама нода — это норма, потому проверяем только при отсутствии маркера.
+    # контейнера тихо упадёт на bind. На ре-запуске порт держит сама нода.
     if [[ ! -f "$STATE_MARKER" ]]; then
-        if ss -lntH 2>/dev/null | awk '{print $4}' | grep -qE ':443$'; then
+        if port_listening 443; then
             die "Порт 443 уже занят другим процессом (ss -lntp | grep :443). Освободи его."
         fi
         ok "Порт 443 свободен"
@@ -242,6 +315,12 @@ phase1_input() {
     ask "Домен для этой ноды"
     read -r DOMAIN </dev/tty
     if [[ -z "$DOMAIN" ]]; then die "Домен не может быть пустым"; fi
+    # Домен уходит в имя файла nginx, server_name, -d для certbot, serverNames
+    # в JSON и пути маунтов compose. Пробел, кавычка, / или ; — от битого
+    # конфига до инъекции в nginx (M-2).
+    if ! [[ "$DOMAIN" =~ ^[a-zA-Z0-9]([a-zA-Z0-9-]{0,61}[a-zA-Z0-9])?(\.[a-zA-Z0-9]([a-zA-Z0-9-]{0,61}[a-zA-Z0-9])?)+$ ]]; then
+        die "Некорректный домен: '$DOMAIN' (ожидается вида example.ru)"
+    fi
 
     # getent есть на чистой системе (dig ставится позже, в phase2).
     RESOLVED_IP=$(getent ahostsv4 "$DOMAIN" 2>/dev/null \
@@ -254,7 +333,7 @@ phase1_input() {
         warn "Не удалось определить внешний IP автоматически."
         ask "Введи внешний IPv4 сервера вручную"
         read -r SERVER_IP </dev/tty
-        [[ -z "$SERVER_IP" ]] && die "IP сервера обязателен"
+        valid_ipv4 "$SERVER_IP" || die "IP сервера обязателен и должен быть IPv4"
     fi
 
     if [[ -n "$RESOLVED_IP" && "$RESOLVED_IP" == "$SERVER_IP" ]]; then
@@ -290,7 +369,13 @@ phase1_input() {
         ssh-*|ecdsa-*|sk-*) : ;;
         *) die "Неверный формат SSH-ключа" ;;
     esac
-    ok "SSH-ключ принят"
+    # Проверка префикса не ловит битый base64 — а такой ключ становится
+    # причиной локаута уже после рестарта sshd (L-9).
+    if command -v ssh-keygen >/dev/null 2>&1; then
+        ssh-keygen -l -f /dev/stdin <<< "$SSH_PUB_KEY" >/dev/null 2>&1 \
+            || die "SSH-ключ не парсится (обрезан при копировании?). Вставь строку целиком."
+    fi
+    ok "SSH-ключ принят и проверен"
 
     echo ""
     ask "Имя ноды (для тегов, например DE_natty_narwhal)"
@@ -304,6 +389,40 @@ phase1_input() {
         die "Имя ноды: только латиница, цифры, _ и - (без пробелов и кавычек)"
     fi
     ok "Имя ноды: $NODE_NAME"
+    # Remnawave требует уникальности тегов inbound по ВСЕМ Config Profile —
+    # одинаковое имя на двух нодах даст конфликт уже в панели (L-11).
+    warn "Имя должно быть уникальным по всему флоту: из него собираются теги"
+    warn "inbound (${NODE_NAME}_tcp / ${NODE_NAME}_xhttp), а Remnawave требует"
+    warn "уникальности тегов по всем Config Profile."
+
+    # --- SSH-порт ------------------------------------------------------------
+    SSH_PORT=$(pick_ssh_port)
+    if [[ -f /etc/ssh/sshd_config.d/00-hardening.conf ]]; then
+        ok "SSH-порт: ${SSH_PORT} (взят из текущей конфигурации ноды)"
+    else
+        ok "SSH-порт: ${SSH_PORT} (случайный — константа на весь флот была маркером)"
+        warn "ЗАПИШИ ЭТОТ ПОРТ. Он же продублирован в ${NODE_INFO} и в итоговой сводке."
+    fi
+
+    # --- IP панели для UFW (H-1) ---------------------------------------------
+    echo ""
+    info "API ноды (:${NODE_API_PORT}) нужен только панели Remnawave."
+    info "Открытый всему интернету, он выдаёт ноду сканом IPv4 по характерному"
+    info "TLS-ответу — то есть по одной опознанной ноде находятся остальные."
+    info "Укажи IP панели, чтобы UFW пускал только её. 'any' — оставить открытым."
+    ask "IP панели Remnawave"
+    read -r PANEL_IP </dev/tty
+    if [[ "$PANEL_IP" == "any" ]]; then
+        warn "API ноды останется открытым всему интернету (маркер для сканеров)."
+        PANEL_IP="any"
+    elif ! valid_ipv4 "$PANEL_IP"; then
+        die "Нужен IPv4 панели или 'any'"
+    else
+        ok "API ноды будет доступен только с ${PANEL_IP}"
+        info "При смене IP панели нода отвалится от управления — VPN при этом"
+        info "продолжит работать (Xray живёт своим конфигом). Правится на ноде:"
+        info "  ufw allow from НОВЫЙ_IP to any port ${NODE_API_PORT} proto tcp"
+    fi
 
     echo ""
     info "Транспорт VLESS + Reality:"
@@ -336,7 +455,11 @@ phase1_input() {
             die "Некорректный порт xhttp (диапазон 1-65535)"
         fi
         if port_reserved "$XHTTP_PORT"; then
-            die "Порт $XHTTP_PORT занят нодой (443/80/${SSH_PORT}/${NODE_API_PORT}/${NGINX_FALLBACK_PORT})"
+            die "Порт $XHTTP_PORT занят нодой (443/80/${SSH_PORT}/${NODE_API_PORT}/${NGINX_FALLBACK_PORT}/${BESZEL_PORT})"
+        fi
+        # Список зарезервированного не покрывает чужие сервисы на хосте (L-10).
+        if [[ ! -f "$STATE_MARKER" ]] && port_listening "$XHTTP_PORT"; then
+            die "На порту $XHTTP_PORT уже кто-то слушает (ss -lntp | grep :$XHTTP_PORT)"
         fi
         ok "xhttp-порт: $XHTTP_PORT"
     fi
@@ -346,6 +469,8 @@ phase1_input() {
     info "  Домен:     $DOMAIN"
     info "  IP:        $SERVER_IP"
     info "  Нода:      $NODE_NAME"
+    info "  SSH-порт:  $SSH_PORT"
+    info "  IP панели: $PANEL_IP"
     info "  Транспорт: $TRANSPORT"
     [[ "$TRANSPORT" == "both" ]] && info "  xhttp-порт: $XHTTP_PORT"
     info "  SSH-ключ:  ${SSH_PUB_KEY:0:40}..."
@@ -422,27 +547,54 @@ phase2_deps() {
     docker compose version >/dev/null 2>&1 \
         || die "Нужен docker compose v2 (плагин docker-compose-plugin). Установи его и повтори."
 
-    # Docker log rotation (ДО запуска контейнеров!). Не затираем чужой конфиг.
-    mkdir -p /etc/docker
-    if [[ -f /etc/docker/daemon.json ]] \
-        && ! grep -q '"log-driver"' /etc/docker/daemon.json; then
-        warn "/etc/docker/daemon.json уже существует — делаю бэкап"
-    fi
-    backup_file /etc/docker/daemon.json
-    cat > /etc/docker/daemon.json << 'DKEOF'
-{
-  "log-driver": "json-file",
-  "log-opts": { "max-size": "10m", "max-file": "3" }
+    configure_docker_logging
 }
-DKEOF
+
+configure_docker_logging() {
+    # Ротация docker-логов (ДО запуска контейнеров). Раньше файл переписывался
+    # целиком: предупреждение о бэкапе печаталось, а чужие настройки демона
+    # (registry-mirrors, dns, storage-driver) молча терялись (M-5). Плюс
+    # безусловный `systemctl restart docker` на живой ноде рвал все соединения
+    # клиентов, даже когда менять было нечего (M-6).
+    mkdir -p /etc/docker
+    local dj=/etc/docker/daemon.json tmp
+    tmp=$(mktemp)
+    if [[ -s "$dj" ]]; then
+        if ! jq -S '. + {"log-driver": "json-file"}
+                 | .["log-opts"] = ((.["log-opts"] // {})
+                     + {"max-size": "10m", "max-file": "3"})' \
+                "$dj" > "$tmp" 2>/dev/null; then
+            warn "/etc/docker/daemon.json не парсится как JSON — перезаписываю (бэкап рядом)"
+            jq -S -n '{"log-driver": "json-file",
+                       "log-opts": {"max-size": "10m", "max-file": "3"}}' > "$tmp"
+        fi
+    else
+        jq -S -n '{"log-driver": "json-file",
+                   "log-opts": {"max-size": "10m", "max-file": "3"}}' > "$tmp"
+    fi
+
+    if cmp -s "$tmp" "$dj" 2>/dev/null; then
+        rm -f "$tmp"
+        ok "Docker: log rotation уже настроена, демон не трогаю"
+        return 0
+    fi
+    backup_file "$dj"
+    install -m 0644 "$tmp" "$dj"
+    rm -f "$tmp"
     systemctl restart docker 2>/dev/null || true
-    ok "Docker: log rotation 10MB × 3"
+    ok "Docker: log rotation 10MB × 3 (демон перезапущен — конфиг изменился)"
 }
 
 phase3_ssh() {
     title "Фаза 3 / SSH hardening"
     if id "admin" &>/dev/null; then
         ok "Пользователь admin уже существует"
+        # Нода, где admin был создан раньше Docker: без этого `docker ps`
+        # из-под admin не работает (L-8).
+        usermod -aG sudo admin 2>/dev/null || true
+        if getent group docker >/dev/null 2>&1; then
+            usermod -aG docker admin 2>/dev/null || true
+        fi
     else
         groupadd -f admin
         useradd -m -s /bin/bash -g admin -G sudo,docker admin 2>/dev/null \
@@ -450,14 +602,33 @@ phase3_ssh() {
         ok "Пользователь admin создан"
     fi
     mkdir -p /home/admin/.ssh
-    echo "$SSH_PUB_KEY" > /home/admin/.ssh/authorized_keys
+    # Дописываем, а не перезаписываем: скрипт идемпотентен и предполагает
+    # повторные запуски, а `>` молча сносил второй ключ — ноутбука, коллеги,
+    # CI. Оператор, запустивший скрипт с другой машины, терял старый доступ (H-5).
+    touch /home/admin/.ssh/authorized_keys
+    if grep -qxF "$SSH_PUB_KEY" /home/admin/.ssh/authorized_keys; then
+        ok "SSH-ключ уже в authorized_keys"
+    else
+        echo "$SSH_PUB_KEY" >> /home/admin/.ssh/authorized_keys
+        ok "SSH-ключ добавлен (существующие ключи сохранены)"
+    fi
     chmod 700 /home/admin/.ssh
     chmod 600 /home/admin/.ssh/authorized_keys
     chown -R admin:"$(id -gn admin)" /home/admin/.ssh
-    ok "SSH-ключ установлен"
-    echo "admin ALL=(ALL) NOPASSWD:ALL" > /etc/sudoers.d/admin
-    chmod 440 /etc/sudoers.d/admin
-    ok "sudo без пароля"
+
+    # visudo -cf перед установкой: содержимое статичное, но битый файл в
+    # sudoers.d ломает sudo целиком (L-6).
+    local sudo_tmp
+    sudo_tmp=$(mktemp)
+    echo "admin ALL=(ALL) NOPASSWD:ALL" > "$sudo_tmp"
+    if visudo -cf "$sudo_tmp" >/dev/null 2>&1; then
+        install -m 0440 "$sudo_tmp" /etc/sudoers.d/admin
+        ok "sudo без пароля"
+    else
+        rm -f "$sudo_tmp"
+        die "Сгенерированный /etc/sudoers.d/admin не прошёл visudo -cf"
+    fi
+    rm -f "$sudo_tmp"
 
     cp /etc/ssh/sshd_config "/etc/ssh/sshd_config.bak.$(date +%s)"
     mkdir -p /etc/ssh/sshd_config.d /run/sshd
@@ -490,25 +661,53 @@ SSHEOF
 
     # Ключевое от «SSH постоянно падает»: socket-активация игнорирует Port и
     # оживает после apt upgrade openssh-server. mask держит её выключенной
-    # навсегда; порт 2810 обслуживает именно ssh.service.
+    # навсегда; выбранный порт обслуживает именно ssh.service.
     systemctl disable --now ssh.socket 2>/dev/null || true
     systemctl mask ssh.socket 2>/dev/null || true
     systemctl unmask ssh 2>/dev/null || true
     systemctl enable --now ssh 2>/dev/null || systemctl enable --now sshd
     systemctl restart ssh 2>/dev/null || systemctl restart sshd
 
+    # sshd -t проверяет только синтаксис. Какое значение реально победило в
+    # склейке дроп-инов, показывает лишь -T (L-7).
+    local eff
+    eff=$(sshd -T 2>/dev/null | grep -iE '^(port|passwordauthentication|permitrootlogin) ' || true)
+    if [[ -n "$eff" ]]; then
+        info "Эффективный конфиг sshd:"
+        while IFS= read -r line; do info "    $line"; done <<< "$eff"
+    fi
+    if ! grep -qi "^port ${SSH_PORT}\$" <<< "$eff"; then
+        warn "sshd -T не подтверждает порт ${SSH_PORT} — проверь дроп-ины в /etc/ssh/sshd_config.d"
+    fi
+    if ! grep -qi '^passwordauthentication no$' <<< "$eff"; then
+        warn "sshd -T показывает включённую парольную аутентификацию!"
+    fi
+
     if ss -lntp 2>/dev/null | grep -qE ":${SSH_PORT}[[:space:]]"; then
         ok "SSH: слушает :${SSH_PORT}, key-only, root запрещён, socket masked"
     else
         warn "SSH не слушает :${SSH_PORT} — проверь из VNC до выхода!"
     fi
-    warn "ВАЖНО: проверь из ДРУГОГО терминала: ssh -p ${SSH_PORT} admin@${SERVER_IP}"
+
+    # Пауза (H-6). Раньше скрипт печатал предупреждение и шёл дальше: опечатка
+    # в ключе или закрытый порт обнаруживались через 15 минут, когда сессия уже
+    # закрыта, и оставался только VNC. Текущая сессия ещё жива — проверяем сейчас.
+    echo ""
+    warn "ПРОВЕРЬ СЕЙЧАС из ДРУГОГО терминала, не закрывая этот:"
+    warn "    ssh -p ${SSH_PORT} admin@${SERVER_IP}"
+    warn "Текущая сессия остаётся живой, пока ты не ответишь."
+    ask "Доступ подтверждён? (y/n)"
+    read -r _sshok </dev/tty
+    if [[ "$_sshok" != "y" ]]; then
+        die "Прервано до потери доступа. Текущая сессия жива, чини SSH и запусти заново."
+    fi
+    ok "SSH-доступ подтверждён"
 }
 
 phase4_fail2ban() {
     title "Фаза 4 / fail2ban"
     # backend=systemd — на Ubuntu 24.04 журнал journald, auth.log может
-    # отсутствовать. Порт берётся из единой константы.
+    # отсутствовать. Порт берётся из выбранного в phase1.
     cat > /etc/fail2ban/jail.local << F2BEOF
 [sshd]
 enabled  = true
@@ -522,10 +721,16 @@ F2BEOF
     systemctl enable fail2ban
     systemctl restart fail2ban
     ok "fail2ban: SSH на :${SSH_PORT}, бан после 3 попыток"
+    info "Цепочки f2b-* пересоздаются ещё раз после UFW (фаза 14) — см. H-4."
 }
 
 phase5_sysctl() {
-    title "Фаза 5 / Kernel tuning"
+    title "Фаза 5 / Kernel tuning + таймзона"
+    # nf_conntrack_max жил только в `sysctl -w` и терялся при ребуте (L-1).
+    # Модуль грузится через modules-load.d, иначе на свежем ядре ключа
+    # net.netfilter.* ещё нет в момент применения sysctl.
+    echo "nf_conntrack" > /etc/modules-load.d/remnanode.conf
+    modprobe nf_conntrack 2>/dev/null || true
     cat > /etc/sysctl.d/99-remnanode.conf << 'SYSEOF'
 net.core.default_qdisc = fq
 net.ipv4.tcp_congestion_control = bbr
@@ -545,13 +750,20 @@ net.ipv4.conf.all.send_redirects = 0
 net.ipv4.conf.default.send_redirects = 0
 net.ipv4.conf.all.accept_source_route = 0
 net.ipv4.conf.default.accept_source_route = 0
+net.netfilter.nf_conntrack_max = 131072
 fs.file-max = 1048576
 fs.nr_open = 1048576
 SYSEOF
     sysctl -p /etc/sysctl.d/99-remnanode.conf >/dev/null 2>&1 || true
-    modprobe nf_conntrack 2>/dev/null || true
-    sysctl -w net.netfilter.nf_conntrack_max=131072 >/dev/null 2>&1 || true
-    ok "BBR, TCP buffers, SYN flood protection"
+    ok "BBR, TCP buffers, SYN flood protection, conntrack (переживает ребут)"
+
+    # Свежая Ubuntu = UTC. Крон и логи читались как «по Москве», хотя были в UTC
+    # (BLK-3): «ночные» задачи приходились на утро по МСК.
+    if timedatectl set-timezone "$NODE_TZ" 2>/dev/null; then
+        ok "Таймзона: ${NODE_TZ} ($(date '+%F %T %Z'))"
+    else
+        warn "Не удалось задать таймзону ${NODE_TZ} — расписание считай в UTC"
+    fi
 }
 
 phase6_ssl() {
@@ -575,29 +787,47 @@ RDEOF
     systemctl enable nginx
     systemctl restart nginx
 
-    if [[ -d "/etc/letsencrypt/live/${DOMAIN}" ]]; then
-        ok "SSL для $DOMAIN уже есть"
+    # Проверка «директория есть» пропускала протухший сертификат: нода,
+    # пролежавшая пару месяцев, получала «SSL уже есть», fallback-nginx отдавал
+    # невалидный cert, и Reality-проббер видел аномалию ровно там, где нужна
+    # неотличимость от обычного хостинга (M-10).
+    local fullchain="/etc/letsencrypt/live/${DOMAIN}/fullchain.pem"
+    local email_arg=(--register-unsafely-without-email)
+    [[ -n "$CERTBOT_EMAIL" ]] && email_arg=(--email "$CERTBOT_EMAIL")
+
+    if [[ -f "$fullchain" ]] \
+        && openssl x509 -checkend 604800 -noout -in "$fullchain" >/dev/null 2>&1; then
+        local until
+        until=$(openssl x509 -enddate -noout -in "$fullchain" 2>/dev/null | cut -d= -f2)
+        ok "SSL для $DOMAIN валиден (до ${until:-?})"
+    elif [[ -f "$fullchain" ]]; then
+        warn "Сертификат $DOMAIN истёк или истекает в ближайшие 7 дней — продлеваю"
+        certbot renew --force-renewal --cert-name "$DOMAIN" \
+            --webroot -w "$WEBROOT" --non-interactive \
+            || die "Не удалось продлить SSL. Проверь: dig $DOMAIN A +short"
+        ok "SSL $DOMAIN продлён"
     else
         info "Получаю SSL для $DOMAIN (webroot, без остановки nginx)..."
-        local email_arg=(--register-unsafely-without-email)
-        [[ -n "$CERTBOT_EMAIL" ]] && email_arg=(--email "$CERTBOT_EMAIL")
         certbot certonly --webroot -w "$WEBROOT" --non-interactive --agree-tos \
             "${email_arg[@]}" -d "$DOMAIN" \
             || die "Не удалось получить SSL. Проверь: dig $DOMAIN A +short"
         ok "SSL $DOMAIN получен"
     fi
 
-    # Renewal тоже через webroot + reload (без stop). Глобальный cli.ini
-    # безопасен: authenticator webroot не гасит сервисы.
-    backup_file /etc/letsencrypt/cli.ini
-    # deploy-hook НЕ здесь: recreate ноды делает renewal-hook из фазы 12
-    # (одного reload nginx мало — контейнер держит старый inode симлинка).
-    cat > /etc/letsencrypt/cli.ini << CERTEOF
-authenticator = webroot
-webroot-path = ${WEBROOT}
-CERTEOF
+    # Глобальный /etc/letsencrypt/cli.ini навязывал authenticator=webroot ВСЕМ
+    # будущим сертификатам хоста, включая DNS-01. Параметры выпуска и так
+    # сохраняются в renewal/DOMAIN.conf, так что файл избыточен (L-2).
+    # Снимаем свою версию, если её оставил прошлый прогон; чужую не трогаем.
+    if [[ -f /etc/letsencrypt/cli.ini ]] \
+        && grep -q '^authenticator = webroot$' /etc/letsencrypt/cli.ini \
+        && grep -q "^webroot-path = ${WEBROOT}\$" /etc/letsencrypt/cli.ini \
+        && [[ $(grep -cvE '^\s*(#|$)' /etc/letsencrypt/cli.ini) -eq 2 ]]; then
+        backup_file /etc/letsencrypt/cli.ini
+        rm -f /etc/letsencrypt/cli.ini
+        info "Убран глобальный cli.ini прошлых версий (влиял на все сертификаты хоста)"
+    fi
     systemctl enable certbot.timer 2>/dev/null || true
-    ok "Автопродление SSL: webroot (recreate ноды — renewal-hook из фазы 12)"
+    ok "Автопродление SSL: webroot (recreate ноды — renewal-hook из фазы 11)"
 }
 
 phase7_nginx() {
@@ -608,7 +838,7 @@ phase7_nginx() {
     cat > "/etc/nginx/sites-available/${DOMAIN}.conf" << NGXEOF
 server {
     # Только loopback: fallback достижим лишь через Reality dest 127.0.0.1,
-    # наружу не публикуется (см. phase15 — порт убран из UFW).
+    # наружу не публикуется (см. фазу 14 — порт убран из UFW).
     listen 127.0.0.1:${NGINX_FALLBACK_PORT} ssl http2 proxy_protocol;
     server_name ${DOMAIN};
     set_real_ip_from 127.0.0.1;
@@ -621,6 +851,9 @@ server {
     ssl_prefer_server_ciphers on;
     root ${WEBROOT};
     index index.html;
+    # Голый 404 на «сайте студии» выглядит небрежно — отдаём свою страницу.
+    error_page 404 /404.html;
+    location = /404.html { internal; }
     location / {
         try_files \$uri \$uri/ =404;
     }
@@ -634,19 +867,59 @@ NGXEOF
     ok "nginx: HTTPS fallback на :${NGINX_FALLBACK_PORT}"
 }
 
+# --- Генератор лендинга -------------------------------------------------------
+# Всё производное берётся из хэша домена: на ре-запуске сайт не меняется
+# (идемпотентность, снятый ранее фингерпринт остаётся валиден), но между нодами
+# различается не только палитрой. До 3.10 HTML-скелет, порядок CSS-правил,
+# тексты карточек и футер были байт-в-байт одинаковы на всём флоте — хэш
+# нормализованной структуры страницы совпадал, и одна опознанная нода выдавала
+# остальные одним запросом в Censys.
+_site_hash=""
+hx() {
+    # Целое из среза хэша домена: $1 — смещение, $2 — длина. Срезы не должны
+    # перекрываться, иначе производные значения окажутся связаны между собой —
+    # ради этого источник склеен из двух md5 (64 символа на ~20 срезов).
+    echo $(( 16#${_site_hash:$1:$2} ))
+}
+
+_write_favicon() {
+    # Минимальный валидный 16×16 ICO, залитый цветом темы. Отсутствие
+    # favicon.ico у «сайта компании» — заметная аномалия, а одинаковый файл на
+    # весь флот стал бы новым маркером, поэтому цвет берётся из палитры ноды.
+    local out="$1" hex="${2#\#}" i px
+    local r=$(( 16#${hex:0:2} )) g=$(( 16#${hex:2:2} )) b=$(( 16#${hex:4:2} ))
+    px=$(printf '\\x%02x\\x%02x\\x%02x\\xff' "$b" "$g" "$r")
+    {
+        # ICONDIR: reserved=0, type=1 (icon), count=1
+        printf '%b' '\x00\x00\x01\x00\x01\x00'
+        # ICONDIRENTRY: 16×16, палитра 0, planes=1, bpp=32,
+        # размер данных 0x468 = 40 (заголовок) + 1024 (XOR) + 64 (AND), offset 22
+        printf '%b' '\x10\x10\x00\x00\x01\x00\x20\x00\x68\x04\x00\x00\x16\x00\x00\x00'
+        # BITMAPINFOHEADER: size=40, w=16, h=32 (XOR+AND), planes=1, bpp=32
+        printf '%b' '\x28\x00\x00\x00\x10\x00\x00\x00\x20\x00\x00\x00\x01\x00\x20\x00'
+        printf '%b' '\x00\x00\x00\x00\x00\x04\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00'
+        printf '%b' '\x00\x00\x00\x00\x00\x00\x00\x00'
+        # XOR-битмап: 256 пикселей BGRA
+        for ((i = 0; i < 256; i++)); do printf '%b' "$px"; done
+        # AND-маска: 16 строк по 4 байта (16 бит выравниваются до слова)
+        for ((i = 0; i < 64; i++)); do printf '%b' '\x00'; done
+    } > "$out"
+}
+
 phase8_fakesite() {
     title "Фаза 8 / Фейковый сайт"
     mkdir -p "$WEBROOT"
 
+    # Шесть услуг на тему — из них берётся 3-5 в порядке, зависящем от домена.
     local THEMES=(
-        "Web Development Studio|We build modern web applications|Web Development,Cloud Solutions,API Integration,DevOps Consulting"
-        "Digital Marketing Agency|Data-driven marketing for growing brands|SEO Optimization,Content Strategy,PPC Management,Social Media"
-        "Cloud Infrastructure|Enterprise-grade cloud hosting solutions|Managed Hosting,Auto Scaling,24/7 Monitoring,CDN Services"
-        "Design Bureau|Creative solutions for digital products|UI/UX Design,Brand Identity,Motion Graphics,Print Design"
-        "IT Consulting|Technology solutions for modern business|Infrastructure Audit,Security Assessment,Migration Planning,Team Training"
-        "Software Solutions|Custom software for complex problems|Enterprise Apps,Mobile Development,Data Analytics,System Integration"
-        "Network Services|Reliable connectivity for your business|Network Design,VoIP Solutions,Fiber Optics,Managed WiFi"
-        "Data Analytics|Turn your data into actionable insights|Business Intelligence,Data Warehousing,ML Models,Dashboards"
+        "Web Development Studio|We build modern web applications|Web Development,Cloud Solutions,API Integration,DevOps Consulting,Performance Audit,Legacy Migration"
+        "Digital Marketing Agency|Data-driven marketing for growing brands|SEO Optimization,Content Strategy,PPC Management,Social Media,Email Campaigns,Market Research"
+        "Cloud Infrastructure|Enterprise-grade cloud hosting solutions|Managed Hosting,Auto Scaling,Monitoring,CDN Services,Backup and Recovery,Cost Optimization"
+        "Design Bureau|Creative solutions for digital products|UI/UX Design,Brand Identity,Motion Graphics,Print Design,Design Systems,Prototyping"
+        "IT Consulting|Technology solutions for modern business|Infrastructure Audit,Security Assessment,Migration Planning,Team Training,Vendor Selection,Process Design"
+        "Software Solutions|Custom software for complex problems|Enterprise Apps,Mobile Development,Data Analytics,System Integration,QA Automation,Technical Support"
+        "Network Services|Reliable connectivity for your business|Network Design,VoIP Solutions,Fiber Optics,Managed WiFi,Site Surveys,Structured Cabling"
+        "Data Analytics|Turn your data into actionable insights|Business Intelligence,Data Warehousing,ML Models,Dashboards,Data Governance,Reporting"
     )
     local COLORS=(
         "#2563eb|#1e40af|#eff6ff"
@@ -658,12 +931,61 @@ phase8_fakesite() {
         "#4f46e5|#4338ca|#eef2ff"
         "#0d9488|#0f766e|#f0fdfa"
     )
-    # Детерминированный выбор от хэша домена: на ре-запуске сайт не меняется,
-    # значит идемпотентность реальна и снятый ранее фингерпринт остаётся валиден.
-    local H
-    H=$(echo -n "$DOMAIN" | md5sum | tr -dc '0-9a-f')
-    local IDX=$(( 16#${H:0:4} % ${#THEMES[@]} ))
-    local CIDX=$(( 16#${H:4:4} % ${#COLORS[@]} ))
+    local FONTS=(
+        "-apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif"
+        "'Helvetica Neue', Helvetica, Arial, sans-serif"
+        "system-ui, 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif"
+        "Georgia, 'Times New Roman', Times, serif"
+    )
+    local CARD_COPY=(
+        "Professional %s services tailored to your business needs and goals."
+        "End-to-end %s delivered by a senior team with a track record."
+        "Practical %s work, scoped to your budget and timeline."
+        "We handle %s so your team can focus on the product."
+    )
+    # Имена классов — самый устойчивый признак страницы: селекторы переживают
+    # смену палитры и текста, и .hero/.card/.services, одинаковые на всём флоте,
+    # опознавались надёжнее любой структуры. Берём из пула по хэшу домена.
+    local HERO_POOL=(hero banner masthead intro lead)
+    local WRAP_POOL=(container wrap content inner page)
+    local GRID_POOL=(services grid offer cards features)
+    local CARD_POOL=(card item tile box panel)
+    local ABOUT_POOL=(about text prose info copy)
+
+    _site_hash="$(echo -n "$DOMAIN" | md5sum | tr -dc '0-9a-f')$(echo -n "${DOMAIN}-layout" | md5sum | tr -dc '0-9a-f')"
+
+    # Внешний вид (срезы 0-31)
+    local IDX=$(( $(hx 0 4) % ${#THEMES[@]} ))
+    local CIDX=$(( $(hx 4 4) % ${#COLORS[@]} ))
+    local FIDX=$(( $(hx 8 2) % ${#FONTS[@]} ))
+    local RADIUS=$(( 4 + $(hx 10 2) % 13 ))          # скругление 4..16px
+    local PAD=$(( 56 + $(hx 12 2) % 40 ))            # вертикальные отступы
+    local HERO_PAD=$(( 60 + $(hx 14 2) % 50 ))
+    local WIDTH=$(( 860 + $(hx 16 2) % 300 ))
+    local COPYV=$(( $(hx 18 2) % ${#CARD_COPY[@]} ))
+    local FOUNDED=$(( 2009 + $(hx 20 2) % 13 ))      # год основания 2009..2021
+    local FIDX2=$(( $(hx 22 2) % 3 ))                # вариант футера
+    local ROBOTSV=$(( $(hx 24 2) % 2 ))
+    local CSSV=$(( $(hx 26 2) % 2 ))                 # форматирование CSS
+
+    # Структура (срезы 32-63) — то, что видит фингерпринтер, нормализовавший
+    # текст и цвета: имена классов, теги, число блоков.
+    local NCARDS=$(( 3 + $(hx 32 2) % 3 ))           # 3..5 карточек
+    local ROT=$(( $(hx 34 2) % 6 ))                  # сдвиг порядка услуг
+    local ORDER=$(( $(hx 36 2) % 2 ))                # порядок секций
+    local EXTRA=$(( $(hx 38 2) % 3 ))                # 0 — без доп. секции
+    local NABOUT=$(( 1 + $(hx 40 2) % 3 ))           # 1..3 абзаца в About
+    local C_HERO="${HERO_POOL[$(( $(hx 42 2) % ${#HERO_POOL[@]} ))]}"
+    local C_WRAP="${WRAP_POOL[$(( $(hx 44 2) % ${#WRAP_POOL[@]} ))]}"
+    local C_GRID="${GRID_POOL[$(( $(hx 46 2) % ${#GRID_POOL[@]} ))]}"
+    local C_CARD="${CARD_POOL[$(( $(hx 48 2) % ${#CARD_POOL[@]} ))]}"
+    local C_ABOUT="${ABOUT_POOL[$(( $(hx 50 2) % ${#ABOUT_POOL[@]} ))]}"
+    # Обёртка блока услуг: section или div — ещё один разряд в хэше структуры.
+    local SECTAG="div"
+    if (( $(hx 52 2) % 2 )); then SECTAG="section"; fi
+    # Наличие nav: одностраничник и сайт с навигацией различаются заметно.
+    local WITH_NAV=$(( $(hx 54 2) % 2 ))
+
     IFS='|' read -r BIZ_NAME BIZ_DESC BIZ_SERVICES <<< "${THEMES[$IDX]}"
     IFS='|' read -r COLOR1 COLOR2 BG_COLOR <<< "${COLORS[$CIDX]}"
 
@@ -672,71 +994,204 @@ phase8_fakesite() {
         | awk '{for(i=1;i<=NF;i++) $i=toupper(substr($i,1,1)) tolower(substr($i,2))}1')
     local YEAR
     YEAR=$(date +%Y)
+    # Год основания больше не константа 2019 на всех нодах: домену, купленному
+    # неделю назад, «since 2019» противоречило датам WHOIS и CT-логов (L-16).
+    (( FOUNDED > YEAR - 2 )) && FOUNDED=$(( YEAR - 2 ))
 
-    cat > "${WEBROOT}/index.html" << SITEEOF
+    local ALL_SVCS SVCS=()
+    IFS=',' read -ra ALL_SVCS <<< "$BIZ_SERVICES"
+    local i
+    for ((i = 0; i < NCARDS; i++)); do
+        SVCS+=( "${ALL_SVCS[$(( (i + ROT) % ${#ALL_SVCS[@]} ))]}" )
+    done
+
+    # --- CSS ---------------------------------------------------------------
+    local CSS
+    CSS=$(cat << CSSEOF
+        * { margin: 0; padding: 0; box-sizing: border-box; }
+        body { font-family: ${FONTS[$FIDX]}; color: #1f2937; background: #fff; }
+        .${C_HERO} { background: linear-gradient(135deg, ${COLOR1}, ${COLOR2}); color: #fff; padding: ${HERO_PAD}px 20px; text-align: center; }
+        .${C_HERO} h1 { font-size: 2.5rem; font-weight: 700; margin-bottom: 1rem; }
+        .${C_HERO} p { font-size: 1.2rem; opacity: 0.9; max-width: 600px; margin: 0 auto; }
+        .${C_WRAP} { max-width: ${WIDTH}px; margin: 0 auto; padding: ${PAD}px 20px; }
+        .${C_GRID} { display: grid; grid-template-columns: repeat(auto-fit, minmax(200px, 1fr)); gap: 24px; margin-top: 40px; }
+        .${C_CARD} { background: ${BG_COLOR}; border-radius: ${RADIUS}px; padding: 24px; text-align: center; }
+        .${C_CARD} h3 { color: ${COLOR1}; margin-bottom: 8px; font-size: 1.1rem; }
+        .${C_CARD} p { color: #6b7280; font-size: 0.9rem; line-height: 1.5; }
+        .${C_ABOUT} { margin-top: ${PAD}px; line-height: 1.8; color: #4b5563; }
+        nav { padding: 16px 20px; text-align: right; font-size: 0.9rem; }
+        nav a { margin-left: 16px; text-decoration: none; }
+        footer { text-align: center; padding: 40px 20px; color: #9ca3af; font-size: 0.85rem; border-top: 1px solid #f3f4f6; margin-top: ${PAD}px; }
+        a { color: ${COLOR1}; }
+CSSEOF
+)
+    # Половина нод отдаёт CSS «в одну строку на правило», половина — развёрнуто.
+    # Дешёвый способ развести хэш нормализованного стиля между нодами.
+    if (( CSSV == 0 )); then
+        CSS=$(echo "$CSS" | sed 's/; /;\n            /g; s/ { /{\n            /g')
+    fi
+
+    # --- Секции ------------------------------------------------------------
+    local SEC_SERVICES SEC_ABOUT SEC_EXTRA=""
+    SEC_SERVICES="        <h2 style=\"text-align:center;font-size:1.8rem;\">Our Services</h2>
+        <${SECTAG} class=\"${C_GRID}\">"
+    local svc desc
+    for svc in "${SVCS[@]}"; do
+        # shellcheck disable=SC2059
+        desc=$(printf "${CARD_COPY[$COPYV]}" "${svc,,}")
+        SEC_SERVICES="${SEC_SERVICES}
+            <div class=\"${C_CARD}\">
+                <h3>${svc}</h3>
+                <p>${desc}</p>
+            </div>"
+    done
+    SEC_SERVICES="${SEC_SERVICES}
+        </${SECTAG}>"
+
+    local ABOUT_PARAS=(
+        "<p>${SITE_NAME} is a team of experienced professionals delivering ${BIZ_NAME,,} services since ${FOUNDED}. We work with clients across Europe, helping them achieve their technology goals with modern, scalable solutions.</p>"
+        "<p style=\"margin-top:12px;\">Our engagements range from short audits to multi-year retainers. We keep teams small and senior, so the people who scope the work are the people who deliver it.</p>"
+        "<p style=\"margin-top:12px;\">Based in Europe. Available worldwide. <a href=\"mailto:info@${DOMAIN}\">Get in touch</a>.</p>"
+    )
+    SEC_ABOUT="        <div class=\"${C_ABOUT}\">
+            <h2 style=\"margin-bottom:16px;\">About Us</h2>"
+    for ((i = 0; i < NABOUT; i++)); do
+        SEC_ABOUT="${SEC_ABOUT}
+            ${ABOUT_PARAS[$i]}"
+    done
+    SEC_ABOUT="${SEC_ABOUT}
+        </div>"
+
+    case "$EXTRA" in
+        1) SEC_EXTRA="        <div class=\"${C_ABOUT}\">
+            <h2 style=\"margin-bottom:16px;\">How We Work</h2>
+            <p>Every engagement starts with a short discovery call, followed by a written scope and a fixed estimate. We ship in two-week iterations and keep a shared board so you always know what is in progress.</p>
+        </div>" ;;
+        2) SEC_EXTRA="        <div class=\"${C_ABOUT}\">
+            <h2 style=\"margin-bottom:16px;\">Why Clients Stay</h2>
+            <p>Most of our work comes from referrals and repeat projects. We keep teams small, senior and stable, so the people who scoped your project are the people who deliver it.</p>
+        </div>" ;;
+    esac
+
+    local FOOTERS=(
+        "&copy; ${FOUNDED}-${YEAR} ${SITE_NAME}. All rights reserved."
+        "${SITE_NAME} &middot; ${FOUNDED}-${YEAR} &middot; All rights reserved."
+        "Copyright ${FOUNDED}-${YEAR} ${SITE_NAME}."
+    )
+
+    local NAV=""
+    if (( WITH_NAV )); then
+        NAV="    <nav><a href=\"/\">Home</a><a href=\"/about.html\">About</a><a href=\"mailto:info@${DOMAIN}\">Contact</a></nav>"
+    fi
+
+    # --- index.html --------------------------------------------------------
+    {
+        cat << HEADEOF
 <!DOCTYPE html>
 <html lang="en">
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <link rel="icon" href="/favicon.ico" sizes="16x16">
     <title>${SITE_NAME} — ${BIZ_NAME}</title>
     <style>
-        * { margin: 0; padding: 0; box-sizing: border-box; }
-        body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; color: #1f2937; background: #fff; }
-        .hero { background: linear-gradient(135deg, ${COLOR1}, ${COLOR2}); color: #fff; padding: 80px 20px; text-align: center; }
-        .hero h1 { font-size: 2.5rem; font-weight: 700; margin-bottom: 1rem; }
-        .hero p { font-size: 1.2rem; opacity: 0.9; max-width: 600px; margin: 0 auto; }
-        .container { max-width: 960px; margin: 0 auto; padding: 60px 20px; }
-        .services { display: grid; grid-template-columns: repeat(auto-fit, minmax(200px, 1fr)); gap: 24px; margin-top: 40px; }
-        .card { background: ${BG_COLOR}; border-radius: 12px; padding: 24px; text-align: center; }
-        .card h3 { color: ${COLOR1}; margin-bottom: 8px; font-size: 1.1rem; }
-        .card p { color: #6b7280; font-size: 0.9rem; line-height: 1.5; }
-        .about { margin-top: 60px; line-height: 1.8; color: #4b5563; }
-        footer { text-align: center; padding: 40px 20px; color: #9ca3af; font-size: 0.85rem; border-top: 1px solid #f3f4f6; margin-top: 60px; }
-        a { color: ${COLOR1}; }
+${CSS}
     </style>
 </head>
 <body>
-    <div class="hero">
+${NAV}
+    <div class="${C_HERO}">
         <h1>${SITE_NAME}</h1>
         <p>${BIZ_DESC}</p>
     </div>
-    <div class="container">
-        <h2 style="text-align:center;font-size:1.8rem;">Our Services</h2>
-        <div class="services">
-SITEEOF
-
-    IFS=',' read -ra SVCS <<< "$BIZ_SERVICES"
-    for svc in "${SVCS[@]}"; do
-        cat >> "${WEBROOT}/index.html" << CARDEOF
-            <div class="card">
-                <h3>${svc}</h3>
-                <p>Professional ${svc,,} services tailored to your business needs and goals.</p>
-            </div>
-CARDEOF
-    done
-
-    cat >> "${WEBROOT}/index.html" << FOOTEOF
-        </div>
-        <div class="about">
-            <h2 style="margin-bottom:16px;">About Us</h2>
-            <p>${SITE_NAME} is a team of experienced professionals delivering ${BIZ_NAME,,} services since 2019. We work with clients across Europe, helping them achieve their technology goals with modern, scalable solutions.</p>
-            <p style="margin-top:12px;">Based in Europe. Available worldwide. <a href="mailto:info@${DOMAIN}">Get in touch</a>.</p>
-        </div>
+    <div class="${C_WRAP}">
+HEADEOF
+        if (( ORDER == 0 )); then
+            echo "$SEC_SERVICES"
+            echo "$SEC_ABOUT"
+        else
+            echo "$SEC_ABOUT"
+            echo "$SEC_SERVICES"
+        fi
+        [[ -n "$SEC_EXTRA" ]] && echo "$SEC_EXTRA"
+        cat << FOOTEOF
     </div>
     <footer>
-        &copy; 2019-${YEAR} ${SITE_NAME}. All rights reserved. | <a href="mailto:info@${DOMAIN}">info@${DOMAIN}</a>
+        ${FOOTERS[$FIDX2]} | <a href="mailto:info@${DOMAIN}">info@${DOMAIN}</a>
     </footer>
 </body>
 </html>
 FOOTEOF
+    } > "${WEBROOT}/index.html"
+
+    # --- about.html --------------------------------------------------------
+    # Одностраничник — сам по себе признак. Вторая страница и robots.txt делают
+    # ноду похожей на обычный сайт при беглом обходе.
+    cat > "${WEBROOT}/about.html" << ABOUTEOF
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <link rel="icon" href="/favicon.ico" sizes="16x16">
+    <title>About — ${SITE_NAME}</title>
+    <style>
+${CSS}
+    </style>
+</head>
+<body>
+${NAV}
+    <div class="${C_WRAP}">
+        <h1 style="font-size:2rem;margin-bottom:16px;">About ${SITE_NAME}</h1>
+        <div class="${C_ABOUT}">
+            <p>${SITE_NAME} has been delivering ${BIZ_NAME,,} services since ${FOUNDED}. We are a small senior team: the people who scope a project are the people who build it.</p>
+            <p style="margin-top:12px;">We work remotely with clients across Europe. For new enquiries write to <a href="mailto:info@${DOMAIN}">info@${DOMAIN}</a> — we reply within two business days.</p>
+        </div>
+    </div>
+    <footer>
+        ${FOOTERS[$FIDX2]} | <a href="mailto:info@${DOMAIN}">info@${DOMAIN}</a>
+    </footer>
+</body>
+</html>
+ABOUTEOF
+
+    # --- 404.html ----------------------------------------------------------
+    cat > "${WEBROOT}/404.html" << E404EOF
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Page not found — ${SITE_NAME}</title>
+    <style>
+${CSS}
+    </style>
+</head>
+<body>
+    <div class="${C_WRAP}">
+        <h1 style="font-size:2rem;margin-bottom:12px;">Page not found</h1>
+        <p class="${C_ABOUT}">The page you requested does not exist. <a href="/">Back to the homepage</a>.</p>
+    </div>
+</body>
+</html>
+E404EOF
+
+    # --- robots.txt --------------------------------------------------------
+    if (( ROBOTSV == 0 )); then
+        printf 'User-agent: *\nDisallow:\n' > "${WEBROOT}/robots.txt"
+    else
+        printf 'User-agent: *\nAllow: /\nDisallow: /cgi-bin/\n' > "${WEBROOT}/robots.txt"
+    fi
+
+    _write_favicon "${WEBROOT}/favicon.ico" "$COLOR1"
 
     # КРИТИЧНО: под umask 077 файлы создаются 600 root, и nginx-воркер
     # (www-data) отдаёт 403 вместо лендинга — steal_oneself ломается ровно
     # там, где нужен. Явно выставляем читаемые всем права.
     find "$WEBROOT" -type d -exec chmod 755 {} +
     find "$WEBROOT" -type f -exec chmod 644 {} +
-    ok "Фейковый сайт: ${SITE_NAME} — ${BIZ_NAME} (chmod 644)"
+    ok "Сайт: ${SITE_NAME} — ${BIZ_NAME}, ${NCARDS} карточек, since ${FOUNDED}"
+    ok "Плюс about.html, 404.html, robots.txt, favicon.ico (структура своя у каждой ноды)"
 }
 
 # Печатает JSON одного inbound: $1=tag $2=port $3=network(tcp|xhttp).
@@ -758,13 +1213,18 @@ build_inbound() {
     else
         net_block='"network": "tcp",'
     fi
+    # routeOnly=true: подслушанный SNI отдаётся правилам маршрутизации, но НЕ
+    # подменяет адрес назначения. Без него на каждое соединение приходилось два
+    # резолва (роутинг через DNS Xray + freedom через системный), и терялась
+    # CDN-локальность: клиент выбрал ближайший edge, а нода шла на тот, что
+    # вернул её резолвер. quic убран — UDP/443 блокируется правилом ниже (H-2).
     cat << INBEOF
     {
       "tag": "${tag}",
       "port": ${port},
       "protocol": "vless",
       "settings": { "clients": [], "decryption": "none" },
-      "sniffing": { "enabled": true, "destOverride": ["http","tls","quic"] },
+      "sniffing": { "enabled": true, "destOverride": ["http","tls"], "routeOnly": true },
       "streamSettings": {
         ${net_block}
         "security": "reality",
@@ -784,38 +1244,74 @@ INBEOF
 phase9_keygen() {
     title "Фаза 9 / x25519 ключи + Config Profile"
     mkdir -p "$OPT_DIR"
-    info "Генерирую x25519 ключи (образ: ${XRAY_KEYGEN_IMAGE})..."
-    # Пробуем заданный образ, затем ghcr, затем teddysun. Для каждого — оба
-    # стиля вызова (см. xray_x25519). ghcr дублирует дефолт, но становится
-    # реальным резервом, если XRAY_KEYGEN_IMAGE переопределён env-переменной.
-    KEY_OUTPUT=$(xray_x25519 "$XRAY_KEYGEN_IMAGE") \
-        || KEY_OUTPUT=$(xray_x25519 "ghcr.io/xtls/xray-core:latest") \
-        || KEY_OUTPUT=$(xray_x25519 "teddysun/xray:latest") \
-        || die "Не удалось сгенерировать x25519 ключи"
-    # Xray 26.x сменил метки: private → 'Private key'/'PrivateKey',
-    # public → 'Public key'/'Password'. Терпимый парсинг под оба формата.
-    # head -1: если вывод вдруг содержит слово 'private' в нескольких строках
-    # (будущий формат с Hash/Fingerprint) — берём только первую, чтобы не
-    # получить многострочный ключ и не сломать JSON.
-    PRIVATE_KEY=$(echo "$KEY_OUTPUT" | grep -iE 'private' | awk '{print $NF}' | head -1)
-    PUBLIC_KEY=$(echo "$KEY_OUTPUT" | grep -iE 'public|password' | awk '{print $NF}' | head -1)
-    if [[ -z "$PRIVATE_KEY" || -z "$PUBLIC_KEY" ]]; then
-        die "Не удалось извлечь ключи из вывода xray (формат изменился?)"
+
+    # Ре-запуск перегенерировал ключи и shortId. Сама нода не падала (privateKey
+    # живёт в панели), но скрипт печатал НОВЫЙ Config Profile, а оператор,
+    # следуя инструкции фазы 10, вставлял его в панель — и все клиенты этой
+    # ноды мгновенно теряли доступ (M-3). Теперь ключи переиспользуются.
+    local KEYS="${OPT_DIR}/keys.txt" REUSED=0
+    if [[ -f "$KEYS" ]]; then
+        PRIVATE_KEY=$(awk -F= '/^PRIVATE_KEY=/{print $2; exit}' "$KEYS" 2>/dev/null || true)
+        PUBLIC_KEY=$(awk -F= '/^PUBLIC_KEY=/{print $2; exit}' "$KEYS" 2>/dev/null || true)
+        SID1=$(awk -F= '/^SID1=/{print $2; exit}' "$KEYS" 2>/dev/null || true)
+        SID2=$(awk -F= '/^SID2=/{print $2; exit}' "$KEYS" 2>/dev/null || true)
+        SID3=$(awk -F= '/^SID3=/{print $2; exit}' "$KEYS" 2>/dev/null || true)
+        if [[ -n "$PRIVATE_KEY" && -n "$PUBLIC_KEY" \
+              && -n "$SID1" && -n "$SID2" && -n "$SID3" ]]; then
+            REUSED=1
+            ok "Ключи и shortId взяты из ${KEYS} — профиль не изменится"
+            info "Клиенты этой ноды продолжат работать: вставлять JSON в панель"
+            info "повторно не нужно (он совпадёт с уже сохранённым)."
+        elif [[ -n "$PRIVATE_KEY" && -n "$PUBLIC_KEY" ]]; then
+            # keys.txt от версий ≤3.9: ключи есть, shortId в файле не хранились.
+            SID1=$(openssl rand -hex 1)
+            SID2=$(openssl rand -hex 4)
+            SID3=$(openssl rand -hex 8)
+            REUSED=1
+            warn "В ${KEYS} нет сохранённых shortId (файл от версии ≤3.9)."
+            warn "Ключи переиспользованы, shortId сгенерированы заново — их надо"
+            warn "обновить в Config Profile, иначе профиль в панели и на ноде разойдутся."
+        fi
     fi
-    cat > "${OPT_DIR}/keys.txt" << KEYSEOF
-# x25519 keys generated $(date +%Y-%m-%d)
+
+    if (( ! REUSED )); then
+        info "Генерирую x25519 ключи (образ: ${XRAY_KEYGEN_IMAGE})..."
+        # Пробуем заданный образ, затем ghcr, затем teddysun. Для каждого — оба
+        # стиля вызова (см. xray_x25519).
+        KEY_OUTPUT=$(xray_x25519 "$XRAY_KEYGEN_IMAGE") \
+            || KEY_OUTPUT=$(xray_x25519 "ghcr.io/xtls/xray-core:latest") \
+            || KEY_OUTPUT=$(xray_x25519 "teddysun/xray:latest") \
+            || die "Не удалось сгенерировать x25519 ключи"
+        # Xray 26.x сменил метки: private → 'Private key'/'PrivateKey',
+        # public → 'Public key'/'Password'. head -1 защищает от многострочного
+        # вывода будущих версий (Hash/Fingerprint) — иначе ключ ломает JSON.
+        PRIVATE_KEY=$(echo "$KEY_OUTPUT" | grep -iE 'private' | awk '{print $NF}' | head -1)
+        PUBLIC_KEY=$(echo "$KEY_OUTPUT" | grep -iE 'public|password' | awk '{print $NF}' | head -1)
+        if [[ -z "$PRIVATE_KEY" || -z "$PUBLIC_KEY" ]]; then
+            die "Не удалось извлечь ключи из вывода xray (формат изменился?)"
+        fi
+        # shortIds: пустой + 3 случайных разной длины. Общие для обоих inbound.
+        SID1=$(openssl rand -hex 1)
+        SID2=$(openssl rand -hex 4)
+        SID3=$(openssl rand -hex 8)
+        ok "Ключи сгенерированы"
+    fi
+
+    backup_file "$KEYS"
+    cat > "$KEYS" << KEYSEOF
+# x25519 keys + shortIds. Файл — источник истины для идемпотентного ре-запуска:
+# пока он на месте, повторный прогон печатает ТОТ ЖЕ Config Profile.
+# Сгенерировано: $(date +%Y-%m-%d)
 PRIVATE_KEY=$PRIVATE_KEY
 PUBLIC_KEY=$PUBLIC_KEY
+SID1=$SID1
+SID2=$SID2
+SID3=$SID3
 KEYSEOF
-    chmod 600 "${OPT_DIR}/keys.txt"
-    ok "Ключи сгенерированы (${OPT_DIR}/keys.txt, chmod 600)"
+    chmod 600 "$KEYS"
+    ok "Ключи в ${KEYS} (chmod 600)"
     secret "Private Key: $PRIVATE_KEY"
     secret "Public Key:  $PUBLIC_KEY"
-
-    # shortIds: пустой + 3 случайных разной длины. Общие для обоих inbound.
-    SID1=$(openssl rand -hex 1)
-    SID2=$(openssl rand -hex 4)
-    SID3=$(openssl rand -hex 8)
 
     local INBOUNDS
     case "$TRANSPORT" in
@@ -838,10 +1334,17 @@ $(build_inbound "${NODE_NAME}_xhttp" "$XHTTP_PORT" xhttp)"
     echo -e "${CYAN}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
     echo ""
     local PROFILE="${OPT_DIR}/config-profile.json"
+    # Последнее правило routing — BLOCK приватных сетей, а не DIRECT. DIRECT —
+    # это freedom-outbound: нода САМА шла по адресу, который ей передал клиент,
+    # то есть 169.254.169.254 (cloud-metadata хостера), внутренняя сеть
+    # провайдера и собственные 127.0.0.1:${NODE_API_PORT} / :${NGINX_FALLBACK_PORT}
+    # в обход UFW — коннект инициируется нодой, а не приходит снаружи (BLK-1).
+    # domainStrategy IPIfNonMatch обязателен: он резолвит домен ДО проверки
+    # IP-правил, иначе evil.example.com → 169.254.169.254 обошёл бы блок.
     cat > "$PROFILE" << JSONEOF
 {
   "log": { "loglevel": "warning" },
-  "dns": { "servers": [{"address":"https://94.140.14.14/dns-query","domains":[],"skipFallback":false},"localhost"] },
+  "dns": { "servers": [{"address":"${DNS_SERVER}","domains":[],"skipFallback":false},"localhost"] },
   "inbounds": [
 ${INBOUNDS}
   ],
@@ -852,21 +1355,26 @@ ${INBOUNDS}
   "routing": {
     "domainStrategy": "IPIfNonMatch",
     "rules": [
+      {"type":"field","ip":[${PRIVATE_CIDRS}],"outboundTag":"BLOCK"},
       {"type":"field","network":"udp","port":"443","outboundTag":"BLOCK"},
       {"type":"field","protocol":["bittorrent"],"outboundTag":"BLOCK"},
-      {"type":"field","domain":["domain:doubleclick.net","domain:googlesyndication.com","domain:googleadservices.com","domain:google-analytics.com","domain:analytics.yandex.ru","domain:mc.yandex.ru","domain:crashlytics.com","domain:app-measurement.com","domain:appcenter.ms"],"outboundTag":"BLOCK"},
-      {"type":"field","network":"udp","port":"135,137,138,139","outboundTag":"BLOCK"},
-      {"type":"field","ip":["geoip:private"],"outboundTag":"DIRECT"}
+      {"type":"field","domain":["domain:doubleclick.net","domain:googlesyndication.com","domain:googleadservices.com","domain:google-analytics.com","domain:analytics.yandex.ru","domain:mc.yandex.ru"],"outboundTag":"BLOCK"},
+      {"type":"field","network":"udp","port":"135,137,138,139","outboundTag":"BLOCK"}
     ]
   }
 }
 JSONEOF
+    # Профиль обязан быть валидным JSON: битый конфиг обнаружился бы только
+    # после вставки в панель, уже на живых клиентах.
+    jq empty "$PROFILE" 2>/dev/null || die "Сгенерированный Config Profile невалиден как JSON"
     chmod 600 "$PROFILE"
     # Приватный ключ внутри JSON: выводим только на терминал (минуя tee-лог)
-    # и держим в файле 600. В /var/log ключ больше НЕ попадает.
+    # и держим в файле 600. В /var/log ключ НЕ попадает.
     cat "$PROFILE" >/dev/tty
     echo "" >/dev/tty
     info "JSON сохранён в ${PROFILE} (chmod 600, в лог не пишется)"
+    info "Приватные сети (metadata, RFC1918, loopback) — в BLOCK: нода не пойдёт"
+    info "туда по просьбе клиента. Правило первое в списке, менять порядок нельзя."
     echo ""
 }
 
@@ -881,10 +1389,28 @@ phase10_panel() {
     echo -e "${YELLOW}║     → Скопируй SECRET_KEY после создания!${NC}"
     echo -e "${YELLOW}╚══════════════════════════════════════════════════════════════╝${NC}"
     echo ""
-    ask "Вставь SECRET_KEY из панели"
-    read -r SECRET_KEY </dev/tty
-    if [[ -z "$SECRET_KEY" ]]; then die "SECRET_KEY не может быть пустым"; fi
-    ok "SECRET_KEY принят"
+
+    # Ре-запуск гонял оператора в панель за ключом ноды, которая и так работает,
+    # хотя значение лежит в .env рядом (M-8).
+    SECRET_KEY=""
+    if [[ -f "${OPT_DIR}/.env" ]] && grep -q '^SECRET_KEY=' "${OPT_DIR}/.env"; then
+        local existing
+        existing=$(awk -F= '/^SECRET_KEY=/{print $2; exit}' "${OPT_DIR}/.env")
+        if [[ -n "$existing" ]]; then
+            ask "Найден SECRET_KEY в ${OPT_DIR}/.env. Использовать его? (y/n) [y]"
+            read -r _use </dev/tty
+            if [[ -z "$_use" || "$_use" == "y" ]]; then
+                SECRET_KEY="$existing"
+                ok "SECRET_KEY взят из .env"
+            fi
+        fi
+    fi
+    if [[ -z "$SECRET_KEY" ]]; then
+        ask "Вставь SECRET_KEY из панели"
+        read -r SECRET_KEY </dev/tty
+        if [[ -z "$SECRET_KEY" ]]; then die "SECRET_KEY не может быть пустым"; fi
+        ok "SECRET_KEY принят"
+    fi
 
     echo ""
     echo -e "${YELLOW}╔══════════════════════════════════════════════════════════════╗${NC}"
@@ -917,28 +1443,9 @@ phase10_panel() {
     echo ""
 }
 
-phase11_geo() {
-    title "Фаза 11 / Geo-файлы (ДО запуска контейнера!)"
-    mkdir -p "$GEO_DIR"
-    info "Скачиваю geoip.dat и geosite.dat..."
-    # geoip.dat обязателен: на него ссылается правило routing geoip:private.
-    # Без него Xray не поднимет конфиг — лучше упасть здесь, чем ловить битый
-    # контейнер в фазе 12 (docker подставил бы пустую директорию под маунт).
-    if fetch_geo geoip.dat "${GEO_BASE_URL}/geoip.dat"; then
-        ok "geoip.dat: $(du -h "${GEO_DIR}/geoip.dat" | cut -f1)"
-    else
-        die "geoip.dat не скачан/невалиден (нужен для geoip:private). Повтори запуск."
-    fi
-    # geosite.dat текущими правилами не используется — при сбое поднимемся без него.
-    if fetch_geo geosite.dat "${GEO_BASE_URL}/geosite.dat"; then
-        ok "geosite.dat: $(du -h "${GEO_DIR}/geosite.dat" | cut -f1)"
-    else
-        warn "geosite.dat не скачан — нода поднимется без него"
-    fi
-}
-
-phase12_docker() {
-    title "Фаза 12 / remnawave-node"
+phase11_docker() {
+    title "Фаза 11 / remnawave-node"
+    backup_file "${OPT_DIR}/.env"
     cat > "${OPT_DIR}/.env" << ENVEOF
 SSL_CERT=/etc/letsencrypt/live/${DOMAIN}/fullchain.pem
 SSL_KEY=/etc/letsencrypt/live/${DOMAIN}/privkey.pem
@@ -946,16 +1453,27 @@ SECRET_KEY=${SECRET_KEY}
 NODE_PORT=${NODE_API_PORT}
 ENVEOF
     chmod 600 "${OPT_DIR}/.env"
-    # geoip.dat обязателен (гарантирован phase11), geosite — только если скачался.
-    local GEO_VOL="      - ${GEO_DIR}/geoip.dat:/usr/local/share/xray/geoip.dat:ro"
-    if [[ -s "${GEO_DIR}/geosite.dat" ]]; then
-        GEO_VOL="${GEO_VOL}
-      - ${GEO_DIR}/geosite.dat:/usr/local/share/xray/geosite.dat:ro"
+
+    # README учит фиксировать версию правкой image: в compose, а скрипт при
+    # ре-запуске затирал файл значением по умолчанию и делал pull — то есть
+    # молча апгрейдил ядро на живой ноде вопреки документации (M-7).
+    local image="$REMNANODE_IMAGE"
+    if [[ -z "$image" && -f "${OPT_DIR}/docker-compose.yml" ]]; then
+        image=$(awk '/^[[:space:]]*image:[[:space:]]*/{print $2; exit}' \
+            "${OPT_DIR}/docker-compose.yml" 2>/dev/null || true)
+        [[ -n "$image" ]] && info "Образ взят из существующего compose: ${image}"
     fi
+    image="${image:-$REMNANODE_IMAGE_DEFAULT}"
+
+    backup_file "${OPT_DIR}/docker-compose.yml"
+    # Маунтим /etc/letsencrypt целиком :ro — короче двух отдельных pem плюс
+    # archive/, и не ломается при изменении структуры каталога (L-15).
+    # geo-файлы не монтируются: правил geosite нет, а geoip:private заменён
+    # явными CIDR, так что образ обходится встроенными .dat (BLK-3).
     cat > "${OPT_DIR}/docker-compose.yml" << DCEOF
 services:
   remnawave-node:
-    image: ${REMNANODE_IMAGE}
+    image: ${image}
     container_name: remnawave-node
     restart: unless-stopped
     network_mode: host
@@ -967,25 +1485,36 @@ services:
         soft: 1048576
         hard: 1048576
     volumes:
-      - /etc/letsencrypt/live/${DOMAIN}/fullchain.pem:/etc/letsencrypt/live/${DOMAIN}/fullchain.pem:ro
-      - /etc/letsencrypt/live/${DOMAIN}/privkey.pem:/etc/letsencrypt/live/${DOMAIN}/privkey.pem:ro
-      - /etc/letsencrypt/archive/${DOMAIN}:/etc/letsencrypt/archive/${DOMAIN}:ro
-${GEO_VOL}
+      - /etc/letsencrypt:/etc/letsencrypt:ro
 DCEOF
     cd "$OPT_DIR"
-    docker compose pull
+
+    if [[ -f "$STATE_MARKER" && "$image" == *:latest && -z "$REMNANODE_IMAGE" ]]; then
+        warn "Образ ${image} не пинован: pull подтянет свежее ядро и пересоздаст"
+        warn "контейнер — все текущие соединения клиентов оборвутся."
+        ask "Обновить образ ноды сейчас? (y/n) [n]"
+        read -r _pull </dev/tty
+        if [[ "$_pull" == "y" ]]; then
+            docker compose pull || die "docker compose pull не прошёл"
+        else
+            info "Пропускаю pull — работает текущий локальный образ"
+        fi
+    else
+        docker compose pull || die "docker compose pull не прошёл"
+    fi
+
     docker compose up -d
     ok "remnawave-node стартует (network_mode: host, Xray :443)"
     # Поллинг вместо слепого sleep: ждём до 30с появления running-контейнера.
     local _tries=0
-    until docker ps --filter name=remnawave-node --filter status=running \
-            --format '{{.Names}}' | grep -q remnawave-node; do
+    until docker ps --filter "name=^remnawave-node\$" --filter status=running \
+            --format '{{.Names}}' | grep -q .; do
         _tries=$((_tries + 1))
         (( _tries >= 15 )) && break
         sleep 2
     done
-    if docker ps --filter name=remnawave-node --filter status=running \
-            --format '{{.Names}}' | grep -q remnawave-node; then
+    if docker ps --filter "name=^remnawave-node\$" --filter status=running \
+            --format '{{.Names}}' | grep -q .; then
         ok "Контейнер remnawave-node работает"
     else
         warn "Контейнер не поднялся за ~30с! Логи:"
@@ -996,7 +1525,7 @@ DCEOF
     # подхватили новый файл. live/ — симлинк, docker пинует старый inode при
     # маунте, поэтому нужен именно --force-recreate, а не restart.
     # ПРИМЕЧАНИЕ: certbot запускает deploy-хук только при renew, НЕ при первичной
-    # выдаче. Для первого деплоя ноду уже поднял этот же phase12 выше — ок.
+    # выдаче. Для первого деплоя ноду уже поднял этот же phase11 выше — ок.
     mkdir -p /etc/letsencrypt/renewal-hooks/deploy
     cat > /etc/letsencrypt/renewal-hooks/deploy/remnanode.sh << RHEOF
 #!/bin/bash
@@ -1007,73 +1536,121 @@ RHEOF
     ok "Renewal-hook: recreate ноды при продлении сертификата"
 }
 
-phase13_maintenance() {
-    title "Фаза 13 / Автообслуживание"
-    # update-geo: валидирует размер перед подменой live-файла и рестартит ноду
-    # ТОЛЬКО если файл реально изменился (битый .dat не роняет Xray; провал
-    # загрузки не даёт бессмысленный ночной рестарт).
-    cat > "${OPT_DIR}/update-geo.sh" << GEOEOF
-#!/bin/bash
-set -uo pipefail
-GEO_DIR="${GEO_DIR}"
-LOG="/var/log/geo-update.log"
-MIN_SIZE=${GEO_MIN_SIZE}
-BASE="${GEO_BASE_URL}"
-CHANGED=0
-log(){ echo "\$(date '+%F %T') \$*" >> "\$LOG"; }
+phase12_maintenance() {
+    title "Фаза 12 / Автообслуживание"
 
-update_one() {
-    local name="\$1" dst="\${GEO_DIR}/\$1"
-    if wget -q --timeout=30 --tries=3 "\${BASE}/\$name" -O "\${dst}.tmp" \\
-        && [[ -s "\${dst}.tmp" ]] \\
-        && (( \$(stat -c%s "\${dst}.tmp") >= MIN_SIZE )); then
-        if ! cmp -s "\${dst}.tmp" "\$dst" 2>/dev/null; then
-            mv "\${dst}.tmp" "\$dst"; chmod 644 "\$dst"; CHANGED=1
-            log "\$name updated"
-        else
-            rm -f "\${dst}.tmp"
-        fi
-    else
-        rm -f "\${dst}.tmp"; log "\$name download invalid, kept old"
-    fi
-}
-
-update_one geosite.dat
-update_one geoip.dat
-
-if (( CHANGED )); then
-    cd "${OPT_DIR}" && docker compose up -d --force-recreate && log "node recreated"
-else
-    log "no changes, node untouched"
-fi
-GEOEOF
-    chmod +x "${OPT_DIR}/update-geo.sh"
-
-    local CRON_LINE="0 3 * * * ${OPT_DIR}/update-geo.sh"
+    # Снимаем geo-машинерию версий ≤3.9. Её единственным потребителем было
+    # правило geoip:private, заменённое явными CIDR. Цена, которую она брала:
+    # runetfreedom публикует .dat почти ежедневно → cmp видел разницу →
+    # docker compose up -d --force-recreate → все активные соединения на ноде
+    # рвались. Каждую ночь и одновременно на всём флоте (BLK-3).
     local EXISTING FILTERED
     EXISTING=$(crontab -l 2>/dev/null || true)
-    FILTERED=$(echo "$EXISTING" | grep -v "update-geo" || true)
-    printf '%s\n%s\n' "$FILTERED" "$CRON_LINE" | grep -v '^$' | crontab -
-    ok "Cron: автообновление geo в 03:00 (с валидацией)"
+    if grep -q 'update-geo' <<< "$EXISTING"; then
+        FILTERED=$(grep -v 'update-geo' <<< "$EXISTING" || true)
+        printf '%s\n' "$FILTERED" | grep -v '^$' | crontab - || true
+        ok "Снят ночной geo-крон (он пересоздавал контейнер и рвал соединения)"
+    fi
+    if [[ -f "${OPT_DIR}/update-geo.sh" ]]; then
+        rm -f "${OPT_DIR}/update-geo.sh"
+        info "Удалён ${OPT_DIR}/update-geo.sh — geo-файлы больше не нужны"
+    fi
+    if [[ -d "${OPT_DIR}/geodata" ]]; then
+        info "Каталог ${OPT_DIR}/geodata больше не используется, можно удалить вручную"
+    fi
 
-    cat > /etc/apt/apt.conf.d/50unattended-upgrades << 'UUEOF'
+    # Дистрибутивный 50unattended-upgrades несёт blacklist пакетов, настройки
+    # почты и обработку конфликтов конфигов — прошлые версии заменяли его тремя
+    # строками. Восстанавливаем из пакета, своё кладём дроп-ином (M-9).
+    local uu=/etc/apt/apt.conf.d/50unattended-upgrades
+    local uu_dist=/usr/share/unattended-upgrades/50unattended-upgrades
+    if [[ -f "$uu" ]] && ! grep -q 'Package-Blacklist' "$uu" && [[ -f "$uu_dist" ]]; then
+        backup_file "$uu"
+        cp "$uu_dist" "$uu"
+        ok "Восстановлен дистрибутивный 50unattended-upgrades"
+    fi
+    cat > /etc/apt/apt.conf.d/52-remnanode.conf << 'UUEOF'
+// Дроп-ин routerus. Дистрибутивный 50unattended-upgrades не трогаем.
 Unattended-Upgrade::Allowed-Origins {
     "${distro_id}:${distro_codename}-security";
 };
 Unattended-Upgrade::Automatic-Reboot "false";
 UUEOF
     systemctl enable unattended-upgrades
-    ok "Автообновления безопасности включены"
+    ok "Автообновления безопасности: дроп-ин 52-remnanode.conf"
+
+    # Логи ноды росли без ротации (L-4).
+    cat > /etc/logrotate.d/remnanode << 'LREOF'
+/var/log/watchdog.log
+/var/log/deploy-remnanode.log
+{
+    weekly
+    rotate 4
+    compress
+    delaycompress
+    missingok
+    notifempty
+    create 0600 root root
+}
+LREOF
+    ok "logrotate: watchdog.log и deploy-remnanode.log (4 недели)"
 }
 
-phase14_watchdog() {
-    title "Фаза 14 / Watchdog"
+phase13_watchdog() {
+    title "Фаза 13 / Watchdog"
+    # Проверялся только факт существования контейнера — и подстрокой по всему
+    # выводу `docker ps`, то есть матч ловил и имя образа, и чужой контейнер с
+    # похожим именем. Самый частый отказ так не ловился вовсе: контейнер жив,
+    # API 2222 отвечает, панель зелёная, Xray на 443 мёртв — молчали и watchdog,
+    # и панель, и Beszel, а диагностика приходила от клиентов (BLK-2).
+    local INBOUND_PORTS="443"
+    if [[ "$TRANSPORT" == "both" ]]; then
+        INBOUND_PORTS="443 ${XHTTP_PORT}"
+    fi
     cat > "${OPT_DIR}/watchdog.sh" << WDEOF
 #!/bin/bash
-if ! docker ps | grep -q remnawave-node; then
-    echo "\$(date '+%Y-%m-%d %H:%M:%S') watchdog: restarting" >> /var/log/watchdog.log
-    cd "${OPT_DIR}" && docker compose up -d
+# Проверяет РЕАЛЬНЫЙ inbound, а не только наличие контейнера.
+set -uo pipefail
+OPT_DIR="${OPT_DIR}"
+LOG="/var/log/watchdog.log"
+STATE="\${OPT_DIR}/.watchdog_fails"
+INBOUND_PORTS="${INBOUND_PORTS}"
+FAIL_THRESHOLD=2     # рестарт только после 2 провалов подряд
+
+# Без flock зависший прогон и следующий по крону могли наложиться и пересоздать
+# контейнер дважды.
+exec 9>/run/remnanode-watchdog.lock
+flock -n 9 || exit 0
+
+log(){ echo "\$(date '+%F %T') \$*" >> "\$LOG"; }
+
+alive=1
+reason=""
+
+# Точное имя (^…\$) вместо подстроки по всему выводу docker ps.
+docker ps --filter "name=^remnawave-node\\\$" --filter status=running -q \\
+    | grep -q . || { alive=0; reason="container down"; }
+
+if (( alive )); then
+    for p in \$INBOUND_PORTS; do
+        timeout 5 bash -c "exec 3<>/dev/tcp/127.0.0.1/\$p" 2>/dev/null \\
+            || { alive=0; reason="port \$p not accepting"; break; }
+    done
 fi
+
+if (( alive )); then
+    echo 0 > "\$STATE"
+    exit 0
+fi
+
+fails=\$(( \$(cat "\$STATE" 2>/dev/null || echo 0) + 1 ))
+echo "\$fails" > "\$STATE"
+log "unhealthy: \${reason} (fail \${fails}/\${FAIL_THRESHOLD})"
+(( fails < FAIL_THRESHOLD )) && exit 0
+
+log "restarting node"
+cd "\$OPT_DIR" && docker compose up -d --force-recreate >> "\$LOG" 2>&1
+echo 0 > "\$STATE"
 WDEOF
     chmod +x "${OPT_DIR}/watchdog.sh"
     local CRON_WD="*/5 * * * * ${OPT_DIR}/watchdog.sh"
@@ -1081,13 +1658,19 @@ WDEOF
     EXISTING=$(crontab -l 2>/dev/null || true)
     FILTERED=$(echo "$EXISTING" | grep -v "watchdog" || true)
     printf '%s\n%s\n' "$FILTERED" "$CRON_WD" | grep -v '^$' | crontab -
-    ok "Watchdog: проверка каждые 5 минут"
+    ok "Watchdog: коннект на ${INBOUND_PORTS} каждые 5 минут, рестарт после 2 провалов"
 }
 
-phase15_ufw() {
-    title "Фаза 15 / UFW"
-    warn "ufw --force reset сбросит существующие правила (бэкап в /etc/ufw)"
-    ufw --force reset >/dev/null 2>&1
+phase14_ufw() {
+    title "Фаза 14 / UFW"
+    # Безусловный reset на ре-запуске закрывал 45876, добавленный предыдущим
+    # прогоном, и стирал любое ручное правило — мониторинг тихо умирал (M-4).
+    if [[ ! -f "$STATE_MARKER" ]]; then
+        warn "Первичная установка: ufw --force reset (бэкап правил в /etc/ufw)"
+        ufw --force reset >/dev/null 2>&1
+    else
+        info "Повторный запуск — правила не сбрасываю, добавляю нужные поверх"
+    fi
     ufw default deny incoming
     ufw default allow outgoing
     ufw allow "${SSH_PORT}/tcp"            comment "SSH"
@@ -1095,17 +1678,41 @@ phase15_ufw() {
     ufw allow 80/tcp                       comment "HTTP redirect + certbot"
     # nginx-fallback (${NGINX_FALLBACK_PORT}) наружу НЕ открываем: Reality ходит
     # на него по 127.0.0.1, а прямой коннект без proxy_protocol давал аномалию.
-    ufw allow "${NODE_API_PORT}/tcp"       comment "Remnawave node API"
+
+    # API ноды — только с панели (H-1). Открытый миру :2222 с характерным
+    # TLS-ответом Remnawave позволял найти весь флот сканом IPv4.
+    ufw delete allow "${NODE_API_PORT}/tcp" >/dev/null 2>&1 || true
+    if [[ "$PANEL_IP" == "any" ]]; then
+        ufw allow "${NODE_API_PORT}/tcp" comment "Remnawave node API (открыт всем)"
+        warn "API ноды открыт всему интернету — это маркер для сканеров"
+    else
+        ufw allow from "$PANEL_IP" to any port "$NODE_API_PORT" proto tcp \
+            comment "Remnawave panel"
+        ok "API ноды :${NODE_API_PORT} — только с ${PANEL_IP}"
+    fi
+
     if [[ "$TRANSPORT" == "both" ]]; then
         ufw allow "${XHTTP_PORT}/tcp" comment "Xray Reality XHTTP"
         ok "UFW: +${XHTTP_PORT}(xhttp)"
     fi
     ufw --force enable
-    ok "UFW: ${SSH_PORT}(SSH) 443(Xray) 80(HTTP) ${NODE_API_PORT}(API)"
+    ok "UFW: ${SSH_PORT}(SSH) 443(Xray) 80(HTTP) ${NODE_API_PORT}(API, ограничен)"
+
+    # ufw reset/enable перестраивает filter-таблицу своим набором, в котором
+    # цепочек f2b-* нет. Fail2ban об этом не узнаёт до собственного рестарта:
+    # `fail2ban-client status sshd` показывает «enabled», а `iptables -S | grep
+    # f2b` — пусто, то есть защиты нет вообще (H-4).
+    systemctl restart fail2ban 2>/dev/null || true
+    sleep 1
+    if iptables -S 2>/dev/null | grep -q 'f2b-'; then
+        ok "fail2ban перезапущен, цепочки f2b-* на месте"
+    else
+        warn "Цепочек f2b-* нет в iptables — проверь: fail2ban-client status sshd"
+    fi
 }
 
-phase16_beszel() {
-    title "Фаза 16 / Beszel agent"
+phase15_beszel() {
+    title "Фаза 15 / Beszel agent"
     echo ""
     ask "Установить Beszel agent? (y/n)"
     read -r INSTALL_BESZEL </dev/tty
@@ -1119,7 +1726,7 @@ phase16_beszel() {
     if [[ -n "$BESZEL_HUB" ]]; then
         info "Beszel hub: $BESZEL_HUB"
         info "  1. В Beszel UI → Systems → Add System"
-        info "  2. Name: ${NODE_NAME} | Host: ${SERVER_IP} | Port: 45876"
+        info "  2. Name: ${NODE_NAME} | Host: ${SERVER_IP} | Port: ${BESZEL_PORT}"
         info "  3. Скопируй Key из Beszel"
     fi
     echo ""
@@ -1129,7 +1736,25 @@ phase16_beszel() {
         warn "Key не указан, пропускаю"
         return 0
     fi
-    ufw allow 45876/tcp comment "Beszel agent"
+
+    # Открытый всему миру :45876 — такой же маркер флота, как и :2222 (H-1).
+    echo ""
+    info "К агенту подключается только хаб Beszel. Укажи его IP, чтобы UFW"
+    info "не публиковал порт ${BESZEL_PORT} всему интернету. 'any' — оставить открытым."
+    ask "IP хаба Beszel"
+    read -r BESZEL_HUB_IP </dev/tty
+    ufw delete allow "${BESZEL_PORT}/tcp" >/dev/null 2>&1 || true
+    if [[ "$BESZEL_HUB_IP" == "any" ]]; then
+        ufw allow "${BESZEL_PORT}/tcp" comment "Beszel agent (открыт всем)"
+        warn "Порт ${BESZEL_PORT} открыт всему интернету — маркер для сканеров"
+    elif valid_ipv4 "$BESZEL_HUB_IP"; then
+        ufw allow from "$BESZEL_HUB_IP" to any port "$BESZEL_PORT" proto tcp \
+            comment "Beszel hub"
+        ok "Beszel :${BESZEL_PORT} — только с ${BESZEL_HUB_IP}"
+    else
+        die "Нужен IPv4 хаба Beszel или 'any'"
+    fi
+
     docker stop beszel-agent 2>/dev/null || true
     docker rm beszel-agent 2>/dev/null || true
     # Том НЕ удаляем: в нём fingerprint агента. Снос = повторное добавление
@@ -1141,28 +1766,47 @@ phase16_beszel() {
         -v /var/run/docker.sock:/var/run/docker.sock:ro \
         -v beszel_agent_data:/var/lib/beszel-agent \
         -e KEY="$BESZEL_KEY" \
-        -e LISTEN=:45876 \
+        -e LISTEN=":${BESZEL_PORT}" \
         henrygd/beszel-agent:latest
     local _tries=0
-    until docker ps --filter name=beszel-agent --filter status=running \
-            --format '{{.Names}}' | grep -q beszel-agent; do
+    until docker ps --filter "name=^beszel-agent\$" --filter status=running \
+            --format '{{.Names}}' | grep -q .; do
         _tries=$((_tries + 1))
         (( _tries >= 6 )) && break
         sleep 2
     done
-    if docker ps --filter name=beszel-agent --filter status=running \
-            --format '{{.Names}}' | grep -q beszel-agent; then
-        ok "Beszel agent запущен на порту 45876"
+    if docker ps --filter "name=^beszel-agent\$" --filter status=running \
+            --format '{{.Names}}' | grep -q .; then
+        ok "Beszel agent запущен на порту ${BESZEL_PORT}"
         info "Проверь в Beszel UI: нода зелёная и есть fingerprint"
     else
         warn "Beszel agent не запустился. Проверь: docker logs beszel-agent"
     fi
 }
 
-phase17_summary() {
-    title "Фаза 17 / Готово!"
-    # Ставим маркер: следующий запуск на этой ноде пропустит apt upgrade.
+phase16_summary() {
+    title "Фаза 16 / Готово!"
+    # Ставим маркер: следующий запуск на этой ноде пропустит apt upgrade
+    # и не будет сбрасывать UFW.
     touch "$STATE_MARKER"
+
+    # Шпаргалка по ноде. С рандомным SSH-портом реестр нод обязателен: порт
+    # больше не угадывается и не одинаков на флоте.
+    cat > "$NODE_INFO" << NIEOF
+# routerus node info — сгенерировано $(date '+%F %T %Z')
+NODE_NAME=${NODE_NAME}
+DOMAIN=${DOMAIN}
+SERVER_IP=${SERVER_IP}
+SSH_PORT=${SSH_PORT}
+SSH_COMMAND=ssh -p ${SSH_PORT} admin@${SERVER_IP}
+TRANSPORT=${TRANSPORT}
+XHTTP_PORT=$([[ "$TRANSPORT" == "both" ]] && echo "$XHTTP_PORT" || echo "-")
+NODE_API_PORT=${NODE_API_PORT}
+PANEL_IP=${PANEL_IP}
+SCRIPT_VERSION=${SCRIPT_VERSION}
+NIEOF
+    chmod 600 "$NODE_INFO"
+
     echo ""
     echo -e "${GREEN}╔══════════════════════════════════════════════════════════════╗${NC}"
     echo -e "${GREEN}║  DEPLOY v${SCRIPT_VERSION} ЗАВЕРШЁН${NC}"
@@ -1179,10 +1823,15 @@ phase17_summary() {
     secret "Private Key: ${PRIVATE_KEY}"
     secret "Public Key:  ${PUBLIC_KEY}"
     echo ""
+    echo -e "${YELLOW}  ⚠ SSH-порт этой ноды — ${SSH_PORT}. Он случайный и НЕ совпадает${NC}"
+    echo -e "${YELLOW}    с другими нодами. Занеси его в свой реестр: ${NODE_INFO}${NC}"
+    echo ""
     echo -e "${YELLOW}  ⚠ Заверши настройку в панели Remnawave (см. фазу 10 выше)${NC}"
     echo ""
-    info "Ключи: ${OPT_DIR}/keys.txt"
-    info "Лог:   $LOG_FILE (chmod 600, без приватного ключа)"
+    info "Ключи:    ${OPT_DIR}/keys.txt"
+    info "Инфо:     ${NODE_INFO}"
+    info "Лог:      $LOG_FILE (chmod 600, без приватного ключа)"
+    info "Проверка: bash check-node.sh (из репозитория routerus)"
     echo ""
 }
 
@@ -1198,13 +1847,12 @@ main() {
     phase8_fakesite
     phase9_keygen
     phase10_panel
-    phase11_geo
-    phase12_docker
-    phase13_maintenance
-    phase14_watchdog
-    phase15_ufw
-    phase16_beszel
-    phase17_summary
+    phase11_docker
+    phase12_maintenance
+    phase13_watchdog
+    phase14_ufw
+    phase15_beszel
+    phase16_summary
 }
 
 main "$@"

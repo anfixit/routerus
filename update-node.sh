@@ -1,0 +1,424 @@
+#!/usr/bin/env bash
+# =============================================================================
+# update-node.sh v3.10 — накатывает правки аудита на УЖЕ развёрнутую ноду.
+#
+# Зачем отдельный скрипт: часть находок (BLK-2, BLK-3, H-1, H-4, L-1, L-4)
+# живёт на самой ноде, а не в панели, и не ждёт следующего деплоя. Проходить
+# девять серверов руками — ровно та работа, ради которой он и задуман.
+#
+# Запуск на ноде:
+#   sudo bash update-node.sh                 # спросит IP панели
+#   sudo PANEL_IP=1.2.3.4 bash update-node.sh
+#   sudo PANEL_IP=1.2.3.4 DRY_RUN=1 bash update-node.sh   # только показать
+#
+# Скрипт идемпотентен: повторный запуск ничего не ломает и не дублирует.
+# НЕ трогает: ключи Reality, SECRET_KEY, домен, сертификаты, SSH-порт,
+# образ ноды и docker-compose.yml. Пересоздания контейнера не делает.
+#
+# ЧЕГО ОН НЕ УМЕЕТ. BLK-1 (приватные сети → BLOCK) и H-2 (sniffing.routeOnly)
+# живут в Config Profile в ПАНЕЛИ, а не на ноде. Их правит человек, скрипт лишь
+# проверит локальную копию профиля и напомнит. См. итоговую памятку.
+# =============================================================================
+
+set -Eeuo pipefail
+
+readonly OPT_DIR="/opt/remnanode"
+readonly NODE_API_PORT=2222
+readonly BESZEL_PORT=45876
+readonly LOG_FILE="/var/log/update-node.log"
+readonly NODE_TZ="${NODE_TZ:-Europe/Moscow}"
+DRY_RUN="${DRY_RUN:-0}"
+PANEL_IP="${PANEL_IP:-}"
+BESZEL_HUB_IP="${BESZEL_HUB_IP:-}"
+
+RED='\033[0;31m'; GREEN='\033[0;32m'; YELLOW='\033[1;33m'
+BLUE='\033[0;34m'; CYAN='\033[0;36m'; NC='\033[0m'
+
+ok()    { echo -e "${GREEN}  ✔ $1${NC}"; }
+info()  { echo -e "${CYAN}  ℹ $1${NC}"; }
+warn()  { echo -e "${YELLOW}  ⚠ $1${NC}"; }
+die()   { echo -e "${RED}  ✖ $1${NC}"; exit 1; }
+title() { echo -e "\n${BLUE}━━━ $1 ━━━${NC}"; }
+ask()   { echo -ne "${YELLOW}  ▸ $1: ${NC}"; }
+skip()  { echo -e "${CYAN}  · $1${NC}"; }
+
+CHANGED=()
+note() { CHANGED+=("$1"); }
+
+# В DRY_RUN печатаем команду вместо выполнения.
+run() {
+    if (( DRY_RUN )); then
+        echo -e "${YELLOW}    [dry-run] $*${NC}"
+    else
+        "$@"
+    fi
+}
+
+[[ $EUID -ne 0 ]] && die "Запусти от root: sudo bash $0"
+
+umask 077
+touch "$LOG_FILE"; chmod 600 "$LOG_FILE"
+exec > >(tee -a "$LOG_FILE") 2>&1
+trap 'exec 1>&- 2>&-; wait 2>/dev/null || true' EXIT
+trap 'echo -e "${RED}  ✖ Ошибка на строке $LINENO (код $?)${NC}"' ERR
+
+backup_file() { [[ -f "$1" ]] && cp -a "$1" "$1.bak.$(date +%s)"; return 0; }
+
+valid_ipv4() {
+    local ip="$1" o x
+    [[ "$ip" =~ ^([0-9]{1,3}\.){3}[0-9]{1,3}$ ]] || return 1
+    IFS='.' read -ra o <<< "$ip"
+    for x in "${o[@]}"; do (( x <= 255 )) || return 1; done
+    return 0
+}
+
+echo ""
+echo -e "${GREEN}  update-node.sh v3.10 — $(hostname) — $(date '+%F %T %Z')${NC}"
+(( DRY_RUN )) && warn "DRY_RUN=1 — только показываю, ничего не меняю"
+[[ -d "$OPT_DIR" ]] || die "Нет ${OPT_DIR} — это не нода routerus"
+
+# --- Контекст ноды -----------------------------------------------------------
+DOMAIN=""; TRANSPORT=""; XHTTP_PORT=""
+if [[ -f "${OPT_DIR}/node-info.txt" ]]; then
+    DOMAIN=$(awk -F= '/^DOMAIN=/{print $2; exit}' "${OPT_DIR}/node-info.txt")
+    TRANSPORT=$(awk -F= '/^TRANSPORT=/{print $2; exit}' "${OPT_DIR}/node-info.txt")
+    XHTTP_PORT=$(awk -F= '/^XHTTP_PORT=/{print $2; exit}' "${OPT_DIR}/node-info.txt")
+fi
+[[ -z "$DOMAIN" ]] && DOMAIN=$(find /etc/letsencrypt/live -mindepth 1 -maxdepth 1 -type d \
+    -printf '%f\n' 2>/dev/null | head -1)
+
+# Транспорт определяем по факту: на нодах версий ≤3.9 node-info.txt нет, а
+# watchdog должен знать, какие порты проверять. Второй inbound виден в UFW.
+if [[ -z "$TRANSPORT" || "$TRANSPORT" == "-" ]]; then
+    XHTTP_PORT=$(ufw status 2>/dev/null \
+        | awk '/Xray Reality XHTTP/{split($1,a,"/"); print a[1]; exit}')
+    if [[ -n "$XHTTP_PORT" ]]; then TRANSPORT="both"; else TRANSPORT="tcp"; fi
+    info "node-info.txt нет — транспорт определён как '${TRANSPORT}' по правилам UFW"
+fi
+INBOUND_PORTS="443"
+if [[ "$TRANSPORT" == "both" && -n "$XHTTP_PORT" && "$XHTTP_PORT" != "-" ]]; then
+    INBOUND_PORTS="443 ${XHTTP_PORT}"
+fi
+info "Домен: ${DOMAIN:-?} | транспорт: ${TRANSPORT} | inbound: ${INBOUND_PORTS}"
+
+SSH_PORT=$(awk '/^[[:space:]]*Port[[:space:]]+[0-9]+/{print $2; exit}' \
+    /etc/ssh/sshd_config.d/00-hardening.conf 2>/dev/null || true)
+[[ -z "$SSH_PORT" ]] && SSH_PORT=$(sshd -T 2>/dev/null | awk '/^port /{print $2; exit}')
+
+# --- IP панели ---------------------------------------------------------------
+if [[ -z "$PANEL_IP" ]]; then
+    echo ""
+    info "API ноды (:${NODE_API_PORT}) нужен только панели. Открытый всему миру,"
+    info "он выдаёт ноду сканом IPv4 по характерному TLS-ответу Remnawave."
+    info "Введи IP панели, 'any' — оставить открытым, 'skip' — не трогать UFW."
+    ask "IP панели Remnawave"
+    read -r PANEL_IP </dev/tty
+fi
+
+# =============================================================================
+title "1 / Watchdog: проверка реального inbound (BLK-2)"
+# Прежний watchdog смотрел `docker ps | grep` — то есть наличие контейнера, да
+# ещё подстрокой по всему выводу. Отказ, который случался на практике (контейнер
+# жив, API 2222 отвечает, панель зелёная, Xray на 443 мёртв), он не ловил вовсе.
+if [[ -f "${OPT_DIR}/watchdog.sh" ]] && grep -q '/dev/tcp/' "${OPT_DIR}/watchdog.sh" \
+   && grep -q "INBOUND_PORTS=\"${INBOUND_PORTS}\"" "${OPT_DIR}/watchdog.sh"; then
+    skip "watchdog уже проверяет inbound ${INBOUND_PORTS} — пропускаю"
+else
+    backup_file "${OPT_DIR}/watchdog.sh"
+    if (( DRY_RUN )); then
+        echo -e "${YELLOW}    [dry-run] перезаписать ${OPT_DIR}/watchdog.sh (проверка ${INBOUND_PORTS})${NC}"
+    else
+        cat > "${OPT_DIR}/watchdog.sh" << WDEOF
+#!/bin/bash
+# Проверяет РЕАЛЬНЫЙ inbound, а не только наличие контейнера.
+set -uo pipefail
+OPT_DIR="${OPT_DIR}"
+LOG="/var/log/watchdog.log"
+STATE="\${OPT_DIR}/.watchdog_fails"
+INBOUND_PORTS="${INBOUND_PORTS}"
+FAIL_THRESHOLD=2     # рестарт только после 2 провалов подряд
+
+exec 9>/run/remnanode-watchdog.lock
+flock -n 9 || exit 0
+
+log(){ echo "\$(date '+%F %T') \$*" >> "\$LOG"; }
+
+alive=1
+reason=""
+
+docker ps --filter "name=^remnawave-node\\\$" --filter status=running -q \\
+    | grep -q . || { alive=0; reason="container down"; }
+
+if (( alive )); then
+    for p in \$INBOUND_PORTS; do
+        timeout 5 bash -c "exec 3<>/dev/tcp/127.0.0.1/\$p" 2>/dev/null \\
+            || { alive=0; reason="port \$p not accepting"; break; }
+    done
+fi
+
+if (( alive )); then
+    echo 0 > "\$STATE"
+    exit 0
+fi
+
+fails=\$(( \$(cat "\$STATE" 2>/dev/null || echo 0) + 1 ))
+echo "\$fails" > "\$STATE"
+log "unhealthy: \${reason} (fail \${fails}/\${FAIL_THRESHOLD})"
+(( fails < FAIL_THRESHOLD )) && exit 0
+
+log "restarting node"
+cd "\$OPT_DIR" && docker compose up -d --force-recreate >> "\$LOG" 2>&1
+echo 0 > "\$STATE"
+WDEOF
+        chmod +x "${OPT_DIR}/watchdog.sh"
+        bash -n "${OPT_DIR}/watchdog.sh" || die "Сгенерированный watchdog.sh невалиден"
+    fi
+    ok "watchdog заменён: коннект на ${INBOUND_PORTS}, порог 2 провала, flock"
+    note "watchdog теперь ловит мёртвый Xray при живом контейнере"
+fi
+
+if crontab -l 2>/dev/null | grep -q 'watchdog'; then
+    skip "watchdog уже в crontab"
+else
+    if (( DRY_RUN )); then
+        echo -e "${YELLOW}    [dry-run] добавить в crontab: */5 * * * * ${OPT_DIR}/watchdog.sh${NC}"
+    else
+        { crontab -l 2>/dev/null || true; echo "*/5 * * * * ${OPT_DIR}/watchdog.sh"; } \
+            | grep -v '^$' | crontab -
+    fi
+    ok "watchdog добавлен в crontab (каждые 5 минут)"
+    note "watchdog прописан в crontab"
+fi
+
+# =============================================================================
+title "2 / Снятие geo-машинерии (BLK-3)"
+# runetfreedom публикует .dat почти ежедневно → cmp видел разницу →
+# docker compose up -d --force-recreate → все активные соединения рвались.
+# Каждую ночь и синхронно на всём флоте. Ради единственного правила
+# geoip:private, которому эти файлы не нужны: образ несёт свои .dat, а в
+# профиле 3.10 приватные сети заданы явными CIDR.
+if crontab -l 2>/dev/null | grep -q 'update-geo'; then
+    if (( DRY_RUN )); then
+        echo -e "${YELLOW}    [dry-run] удалить строку update-geo из crontab${NC}"
+    else
+        crontab -l 2>/dev/null | grep -v 'update-geo' | grep -v '^$' | crontab - || true
+    fi
+    ok "снят ночной geo-крон (он пересоздавал контейнер и рвал соединения)"
+    note "снят ночной geo-крон — флот больше не падает синхронно"
+else
+    skip "geo-крона нет"
+fi
+if [[ -f "${OPT_DIR}/update-geo.sh" ]]; then
+    run rm -f "${OPT_DIR}/update-geo.sh"
+    ok "удалён update-geo.sh"
+else
+    skip "update-geo.sh уже отсутствует"
+fi
+if [[ -d "${OPT_DIR}/geodata" ]]; then
+    # Файлы не удаляем: docker-compose.yml их ещё монтирует, а compose этот
+    # скрипт принципиально не трогает (в нём может быть пин образа).
+    info "${OPT_DIR}/geodata остаётся: его ещё монтирует docker-compose.yml."
+    info "Маунты уйдут при следующем деплое deploy-remnanode.sh v3.10."
+fi
+
+# =============================================================================
+title "3 / UFW: 2222 и 45876 по источнику (H-1)"
+if [[ "$PANEL_IP" == "skip" ]]; then
+    skip "UFW не трогаю (PANEL_IP=skip)"
+elif [[ "$PANEL_IP" == "any" ]]; then
+    warn "PANEL_IP=any — порт ${NODE_API_PORT} остаётся открытым всему интернету"
+elif valid_ipv4 "$PANEL_IP"; then
+    if ufw status 2>/dev/null | grep -qE "^${NODE_API_PORT}/tcp[[:space:]]+ALLOW IN[[:space:]]+Anywhere"; then
+        # ufw delete возвращает ненулевой код, если правило уже снято другим
+        # прогоном — под set -e это уронило бы скрипт на ровном месте.
+        run ufw delete allow "${NODE_API_PORT}/tcp" || true
+        ok "убрано правило «${NODE_API_PORT} открыт всем»"
+        note "порт ${NODE_API_PORT} закрыт для всех, кроме панели"
+    else
+        skip "правила «${NODE_API_PORT} открыт всем» нет"
+    fi
+    if ufw status 2>/dev/null | grep -q "${NODE_API_PORT}.*${PANEL_IP}"; then
+        skip "доступ с ${PANEL_IP} к ${NODE_API_PORT} уже разрешён"
+    else
+        run ufw allow from "$PANEL_IP" to any port "$NODE_API_PORT" proto tcp \
+            comment "Remnawave panel"
+        ok "API ноды :${NODE_API_PORT} — только с ${PANEL_IP}"
+    fi
+    warn "ПРОВЕРЬ в панели, что нода осталась зелёной. Если позеленение пропало —"
+    warn "IP панели указан неверно, вернуть можно так:"
+    warn "    ufw allow ${NODE_API_PORT}/tcp"
+else
+    die "PANEL_IP должен быть IPv4, 'any' или 'skip' (получено: '${PANEL_IP}')"
+fi
+
+# Beszel: спрашиваем, только если агент реально стоит и порт открыт всем.
+if ufw status 2>/dev/null | grep -qE "^${BESZEL_PORT}/tcp[[:space:]]+ALLOW IN[[:space:]]+Anywhere"; then
+    if [[ -z "$BESZEL_HUB_IP" ]] && [[ "$PANEL_IP" != "skip" ]]; then
+        info "Порт ${BESZEL_PORT} (Beszel) тоже открыт всем — такой же маркер."
+        ask "IP хаба Beszel (Enter — оставить как есть)"
+        read -r BESZEL_HUB_IP </dev/tty
+    fi
+    if valid_ipv4 "${BESZEL_HUB_IP:-}"; then
+        run ufw delete allow "${BESZEL_PORT}/tcp" || true
+        run ufw allow from "$BESZEL_HUB_IP" to any port "$BESZEL_PORT" proto tcp \
+            comment "Beszel hub"
+        ok "Beszel :${BESZEL_PORT} — только с ${BESZEL_HUB_IP}"
+        note "порт ${BESZEL_PORT} закрыт для всех, кроме хаба Beszel"
+    else
+        warn "порт ${BESZEL_PORT} остаётся открытым всему интернету"
+    fi
+else
+    skip "порт ${BESZEL_PORT} не открыт всем"
+fi
+
+# =============================================================================
+title "4 / fail2ban: восстановление цепочек (H-4)"
+# ufw reset/enable перестраивает filter-таблицу своим набором, в котором цепочек
+# f2b-* нет. Fail2ban об этом не узнаёт до собственного рестарта: джейл
+# рапортует «enabled», а в iptables пусто — то есть защиты нет вообще.
+if iptables -S 2>/dev/null | grep -q 'f2b-'; then
+    skip "цепочки f2b-* уже на месте"
+else
+    warn "цепочек f2b-* нет в iptables — джейл 'enabled', но правил нет"
+    run systemctl restart fail2ban
+    (( DRY_RUN )) || sleep 2
+    if (( DRY_RUN )) || iptables -S 2>/dev/null | grep -q 'f2b-'; then
+        ok "fail2ban перезапущен, цепочки восстановлены"
+        note "восстановлены цепочки fail2ban (защита SSH реально не работала)"
+    else
+        warn "цепочки так и не появились — проверь: fail2ban-client status sshd"
+    fi
+fi
+
+# Порт в джейле должен совпадать с реальным портом sshd.
+if [[ -n "$SSH_PORT" ]] && [[ -f /etc/fail2ban/jail.local ]]; then
+    JAILPORT=$(awk -F'= *' '/^port/{print $2; exit}' /etc/fail2ban/jail.local)
+    if [[ "$JAILPORT" != "$SSH_PORT" ]]; then
+        warn "в jail.local порт ${JAILPORT}, а sshd слушает ${SSH_PORT} — бан не сработает"
+    else
+        skip "порт в jail.local совпадает с sshd (${SSH_PORT})"
+    fi
+fi
+
+# =============================================================================
+title "5 / Таймзона, conntrack, logrotate"
+TZNOW=$(timedatectl show -p Timezone --value 2>/dev/null || echo "?")
+if [[ "$TZNOW" == "$NODE_TZ" ]]; then
+    skip "таймзона уже ${NODE_TZ}"
+else
+    run timedatectl set-timezone "$NODE_TZ"
+    ok "таймзона: ${TZNOW} → ${NODE_TZ}"
+    note "таймзона выставлена в ${NODE_TZ} (было ${TZNOW})"
+fi
+
+# nf_conntrack_max ставился только через sysctl -w и терялся при ребуте.
+if grep -q 'nf_conntrack_max' /etc/sysctl.d/99-remnanode.conf 2>/dev/null; then
+    skip "nf_conntrack_max уже в sysctl.d"
+else
+    if (( DRY_RUN )); then
+        echo -e "${YELLOW}    [dry-run] дописать nf_conntrack_max в /etc/sysctl.d/99-remnanode.conf${NC}"
+    else
+        echo "nf_conntrack" > /etc/modules-load.d/remnanode.conf
+        modprobe nf_conntrack 2>/dev/null || true
+        backup_file /etc/sysctl.d/99-remnanode.conf
+        echo "net.netfilter.nf_conntrack_max = 131072" >> /etc/sysctl.d/99-remnanode.conf
+        sysctl -p /etc/sysctl.d/99-remnanode.conf >/dev/null 2>&1 || true
+    fi
+    ok "nf_conntrack_max закреплён (переживёт ребут)"
+    note "nf_conntrack_max больше не теряется при ребуте"
+fi
+
+if [[ -f /etc/logrotate.d/remnanode ]]; then
+    skip "logrotate уже настроен"
+else
+    if (( DRY_RUN )); then
+        echo -e "${YELLOW}    [dry-run] создать /etc/logrotate.d/remnanode${NC}"
+    else
+        cat > /etc/logrotate.d/remnanode << 'LREOF'
+/var/log/watchdog.log
+/var/log/geo-update.log
+/var/log/update-node.log
+/var/log/deploy-remnanode.log
+{
+    weekly
+    rotate 4
+    compress
+    delaycompress
+    missingok
+    notifempty
+    create 0600 root root
+}
+LREOF
+    fi
+    ok "logrotate: логи ноды ротируются (4 недели)"
+    note "включена ротация логов ноды"
+fi
+
+# =============================================================================
+title "6 / Права на секреты"
+for f in "${OPT_DIR}/keys.txt" "${OPT_DIR}/.env" "${OPT_DIR}/config-profile.json" \
+         /var/log/deploy-remnanode.log; do
+    [[ -f "$f" ]] || continue
+    PERM=$(stat -c '%a' "$f" 2>/dev/null)
+    if [[ "$PERM" == "600" ]]; then
+        skip "$(basename "$f"): ${PERM}"
+    else
+        run chmod 600 "$f"
+        ok "$(basename "$f"): ${PERM} → 600"
+        note "исправлены права на $(basename "$f")"
+    fi
+done
+
+# =============================================================================
+title "7 / Проверка после правок"
+for p in $INBOUND_PORTS; do
+    if timeout 5 bash -c "exec 3<>/dev/tcp/127.0.0.1/${p}" 2>/dev/null; then
+        ok "inbound :${p} принимает соединения"
+    else
+        warn "inbound :${p} не отвечает — проверь docker logs remnawave-node"
+    fi
+done
+if docker ps --filter "name=^remnawave-node$" --filter status=running -q | grep -q .; then
+    ok "контейнер remnawave-node работает (не пересоздавался)"
+else
+    warn "контейнер remnawave-node не запущен"
+fi
+
+# =============================================================================
+title "Итог"
+if (( ${#CHANGED[@]} == 0 )); then
+    ok "Изменений не потребовалось — нода уже соответствует v3.10"
+else
+    echo -e "${GREEN}  Сделано на этой ноде:${NC}"
+    for c in "${CHANGED[@]}"; do echo -e "${GREEN}    • ${c}${NC}"; done
+fi
+
+echo ""
+echo -e "${YELLOW}╔══════════════════════════════════════════════════════════════╗${NC}"
+echo -e "${YELLOW}║  ОСТАЛОСЬ СДЕЛАТЬ РУКАМИ В ПАНЕЛИ — скрипт туда не ходит${NC}"
+echo -e "${YELLOW}╠══════════════════════════════════════════════════════════════╣${NC}"
+echo -e "${YELLOW}║  BLK-1. Config Profile → routing.rules: последнее правило${NC}"
+echo -e "${YELLOW}║    {\"ip\":[\"geoip:private\"],\"outboundTag\":\"DIRECT\"}${NC}"
+echo -e "${YELLOW}║  заменить на BLOCK с явным списком приватных сетей.${NC}"
+echo -e "${YELLOW}║  domainStrategy IPIfNonMatch — ОСТАВИТЬ.${NC}"
+echo -e "${YELLOW}║${NC}"
+echo -e "${YELLOW}║  H-2. В каждом inbound: \"sniffing\": {\"enabled\": true,${NC}"
+echo -e "${YELLOW}║    \"destOverride\": [\"http\",\"tls\"], \"routeOnly\": true}${NC}"
+echo -e "${YELLOW}╚══════════════════════════════════════════════════════════════╝${NC}"
+
+# Локальная копия профиля — не источник истины (он в панели), но если здесь
+# всё ещё DIRECT, то и в панели почти наверняка тоже.
+PROFILE="${OPT_DIR}/config-profile.json"
+if [[ -f "$PROFILE" ]] && command -v jq >/dev/null 2>&1; then
+    if jq -e '.routing.rules[] | select(.outboundTag == "DIRECT") | select((.ip // []) | length > 0)' \
+            "$PROFILE" >/dev/null 2>&1; then
+        echo ""
+        warn "В локальной копии ${PROFILE} правило DIRECT для IP ещё на месте —"
+        warn "значит в панели оно, скорее всего, тоже. Это BLK-1, правь сейчас."
+    fi
+fi
+
+echo ""
+info "Полная диагностика: sudo bash check-node.sh"
+info "Лог этого прогона: ${LOG_FILE}"
+echo ""
