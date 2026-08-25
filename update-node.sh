@@ -23,6 +23,7 @@
 set -Eeuo pipefail
 
 readonly OPT_DIR="/opt/remnanode"
+readonly PROFILE="${OPT_DIR}/config-profile.json"
 readonly NODE_API_PORT=2222
 readonly BESZEL_PORT=45876
 readonly LOG_FILE="/var/log/update-node.log"
@@ -504,7 +505,6 @@ echo -e "${YELLOW}╚═══════════════════�
 
 # Локальная копия профиля — не источник истины (он в панели), но если здесь
 # всё ещё DIRECT, то и в панели почти наверняка тоже.
-PROFILE="${OPT_DIR}/config-profile.json"
 if [[ -f "$PROFILE" ]] && command -v jq >/dev/null 2>&1; then
     if jq -e '.routing.rules[] | select(.outboundTag == "DIRECT") | select((.ip // []) | length > 0)' \
             "$PROFILE" >/dev/null 2>&1; then
