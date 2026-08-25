@@ -315,11 +315,38 @@ fi
 
 # Beszel убран из проекта: хаб отключён, его роль выполняет Prometheus на
 # satx-us. На уже развёрнутых нодах агент и открытый порт остаются — снимаем.
+# Агента ставили двумя способами: контейнером и службой systemd. Проверять
+# только контейнер мало — на большинстве нод стоит именно служба, и она
+# продолжает слушать порт, стучась в давно погашенный хаб.
+BESZEL_FOUND=0
 if docker ps -a --format '{{.Names}}' 2>/dev/null | grep -qx "beszel-agent"; then
     run docker rm -f beszel-agent || true
-    # Том с fingerprint тоже больше не нужен: возвращаться в хаб нода не будет.
+    # Том с fingerprint тоже не нужен: возвращаться в хаб нода не будет.
     run docker volume rm beszel_agent_data || true
-    ok "Beszel agent удалён"
+    ok "Beszel agent (контейнер) удалён"
+    BESZEL_FOUND=1
+fi
+if systemctl list-unit-files beszel-agent.service >/dev/null 2>&1 &&
+   [[ -f /etc/systemd/system/beszel-agent.service ]]; then
+    run systemctl disable --now beszel-agent || true
+    run rm -f /etc/systemd/system/beszel-agent.service
+    run systemctl daemon-reload
+    ok "Beszel agent (служба systemd) удалён"
+    BESZEL_FOUND=1
+fi
+if [[ -d /opt/beszel-agent ]]; then
+    run rm -rf /opt/beszel-agent
+    ok "каталог /opt/beszel-agent убран"
+    BESZEL_FOUND=1
+fi
+# Пользователя заводил установщик агента; без агента он лишний.
+if id -u beszel >/dev/null 2>&1; then
+    run userdel beszel || true
+    ok "служебный пользователь beszel удалён"
+    BESZEL_FOUND=1
+fi
+if (( BESZEL_FOUND )); then
+    note "снят Beszel agent"
 else
     skip "Beszel agent не установлен"
 fi

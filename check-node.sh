@@ -240,8 +240,10 @@ if command -v ufw >/dev/null 2>&1 && ufw status >/dev/null 2>&1; then
     fi
     # Beszel убран из проекта. Любой его след — забытый агент или открытый
     # порт: и то, и другое лишнее, а открытый 45876 ещё и опознаёт флот.
-    if grep -qE "^${BESZEL_PORT}/tcp" <<< "$UFWOUT"; then
-        warn "порт ${BESZEL_PORT} остался от Beszel — закрыть: bash update-node.sh"
+    if grep -qE "^${BESZEL_PORT}/tcp" <<< "$UFWOUT" ||
+       [[ -d /opt/beszel-agent ]] ||
+       systemctl is-active beszel-agent >/dev/null 2>&1; then
+        warn "Beszel остался (служба, каталог или порт ${BESZEL_PORT}) — снять: bash update-node.sh"
     fi
     if grep -qE "^${NGINX_FALLBACK_PORT}/tcp[[:space:]]+ALLOW IN" <<< "$UFWOUT"; then
         fail "порт ${NGINX_FALLBACK_PORT} (nginx-fallback) открыт наружу — прямой коннект без proxy_protocol даёт аномалию"
