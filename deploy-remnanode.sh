@@ -1314,7 +1314,7 @@ build_inbound() {
       "port": ${port},
       "protocol": "vless",
       "settings": { "clients": [], "decryption": "none" },
-      "sniffing": { "enabled": true, "destOverride": ["http","tls","quic"] },
+      "sniffing": { "enabled": true, "destOverride": ["http","tls"], "routeOnly": true },
       "streamSettings": {
         ${net_block}
         "security": "reality",
