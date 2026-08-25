@@ -283,7 +283,7 @@ if [[ -d "${OPT_DIR}/geodata" ]]; then
 fi
 
 # =============================================================================
-title "3 / UFW: 2222 и 45876 по источнику (H-1)"
+title "3 / UFW: 2222 по источнику, снятие Beszel (H-1)"
 if [[ "$PANEL_IP" == "skip" ]]; then
     skip "UFW не трогаю (PANEL_IP=skip)"
 elif [[ "$PANEL_IP" == "any" ]]; then
@@ -425,7 +425,33 @@ LREOF
 fi
 
 # =============================================================================
-title "6 / Права на секреты"
+title "6 / Локальная копия профиля: sniffing.routeOnly (H-2)"
+# Настоящий конфиг приходит из панели, но check-node.sh читает эту копию —
+# и пока она устаревшая, проверка ругается на уже исправленную ноду.
+# Обновляем копию, чтобы отчёт говорил правду.
+if [[ -f "$PROFILE" ]] && command -v jq >/dev/null 2>&1; then
+    if jq -e '.inbounds[] | select(.sniffing.enabled == true)
+              | select(.sniffing.routeOnly != true or
+                       ((.sniffing.destOverride // []) | index("quic")))' \
+          "$PROFILE" >/dev/null 2>&1; then
+        TMP_PROFILE=$(mktemp)
+        jq '(.inbounds[] | select(.sniffing.enabled == true) | .sniffing)
+            |= (.routeOnly = true
+                | .destOverride = ((.destOverride // []) - ["quic"]))' \
+           "$PROFILE" > "$TMP_PROFILE" && run mv "$TMP_PROFILE" "$PROFILE"
+        run chmod 600 "$PROFILE"
+        ok "локальная копия профиля обновлена: routeOnly=true, quic убран"
+        note "обновлена локальная копия config-profile.json"
+        warn "в самой панели профиль правится отдельно — проверь Config Profile"
+    else
+        skip "локальная копия профиля уже с routeOnly"
+    fi
+else
+    skip "локальной копии профиля нет"
+fi
+
+# =============================================================================
+title "7 / Права на секреты"
 for f in "${OPT_DIR}/keys.txt" "${OPT_DIR}/.env" "${OPT_DIR}/config-profile.json" \
          /var/log/deploy-remnanode.log; do
     [[ -f "$f" ]] || continue
@@ -440,7 +466,7 @@ for f in "${OPT_DIR}/keys.txt" "${OPT_DIR}/.env" "${OPT_DIR}/config-profile.json
 done
 
 # =============================================================================
-title "7 / Проверка после правок"
+title "8 / Проверка после правок"
 for p in $INBOUND_PORTS; do
     if timeout 5 bash -c "exec 3<>/dev/tcp/127.0.0.1/${p}" 2>/dev/null; then
         ok "inbound :${p} принимает соединения"
