@@ -86,7 +86,6 @@ readonly SCRIPT_VERSION="3.10"
 readonly LOG_FILE="/var/log/deploy-remnanode.log"
 readonly NODE_API_PORT=2222
 readonly NGINX_FALLBACK_PORT=8443
-readonly BESZEL_PORT=45876
 readonly WEBROOT="/var/www/html"
 readonly OPT_DIR="/opt/remnanode"
 readonly STATE_MARKER="${OPT_DIR}/.deployed"   # флаг «уже разворачивали»
@@ -147,7 +146,6 @@ readonly XHTTP_PATH="/api/v1/update"
 # Значения по умолчанию, переопределяемые в phase1.
 XHTTP_PORT=8444
 PANEL_IP=""
-BESZEL_HUB_IP=""
 
 # --- Цвета и вывод ------------------------------------------------------------
 RED='\033[0;31m'; GREEN='\033[0;32m'; YELLOW='\033[1;33m'
@@ -236,7 +234,7 @@ port_reserved() {
     # 0, если порт уже занят самой нодой. SSH_PORT участвует, только когда
     # уже выбран (порядок: сначала SSH, потом xhttp).
     local p="$1" r
-    for r in 443 80 "$NODE_API_PORT" "$NGINX_FALLBACK_PORT" "$BESZEL_PORT" "${SSH_PORT:-}"; do
+    for r in 443 80 "$NODE_API_PORT" "$NGINX_FALLBACK_PORT" "${SSH_PORT:-}"; do
         [[ -n "$r" && "$p" == "$r" ]] && return 0
     done
     return 1
@@ -437,7 +435,7 @@ phase1_input() {
                 die "Некорректный SSH-порт (диапазон 1-65535)"
             fi
             if port_reserved "$_sshport"; then
-                die "Порт $_sshport занят нодой (443/80/${NODE_API_PORT}/${NGINX_FALLBACK_PORT}/${BESZEL_PORT})"
+                die "Порт $_sshport занят нодой (443/80/${NODE_API_PORT}/${NGINX_FALLBACK_PORT})"
             fi
             # Порт, на котором уже сидит sshd, — законный выбор: у части хостеров
             # security group пропускает только 22/80/443, и тогда оставить 22
@@ -508,7 +506,7 @@ phase1_input() {
             die "Некорректный порт xhttp (диапазон 1-65535)"
         fi
         if port_reserved "$XHTTP_PORT"; then
-            die "Порт $XHTTP_PORT занят нодой (443/80/${SSH_PORT}/${NODE_API_PORT}/${NGINX_FALLBACK_PORT}/${BESZEL_PORT})"
+            die "Порт $XHTTP_PORT занят нодой (443/80/${SSH_PORT}/${NODE_API_PORT}/${NGINX_FALLBACK_PORT})"
         fi
         # Список зарезервированного не покрывает чужие сервисы на хосте (L-10).
         if [[ ! -f "$STATE_MARKER" ]] && port_listening "$XHTTP_PORT"; then
@@ -1823,7 +1821,7 @@ phase13_watchdog() {
     # выводу `docker ps`, то есть матч ловил и имя образа, и чужой контейнер с
     # похожим именем. Самый частый отказ так не ловился вовсе: контейнер жив,
     # API 2222 отвечает, панель зелёная, Xray на 443 мёртв — молчали и watchdog,
-    # и панель, и Beszel, а диагностика приходила от клиентов (BLK-2).
+    # и панель, а диагностика приходила от клиентов (BLK-2).
     local INBOUND_PORTS="443"
     if [[ "$TRANSPORT" == "both" ]]; then
         INBOUND_PORTS="443 ${XHTTP_PORT}"
@@ -1973,79 +1971,6 @@ phase14_ufw() {
     fi
 }
 
-phase15_beszel() {
-    title "Фаза 15 / Beszel agent"
-    echo ""
-    ask "Установить Beszel agent? (y/n)"
-    read -r INSTALL_BESZEL </dev/tty
-    if [[ "$INSTALL_BESZEL" != "y" ]]; then
-        info "Beszel пропущен. Можно установить позже"
-        return 0
-    fi
-    echo ""
-    ask "Beszel hub URL (Enter — пропустить подсказку)"
-    read -r BESZEL_HUB </dev/tty
-    if [[ -n "$BESZEL_HUB" ]]; then
-        info "Beszel hub: $BESZEL_HUB"
-        info "  1. В Beszel UI → Systems → Add System"
-        info "  2. Name: ${NODE_NAME} | Host: ${SERVER_IP} | Port: ${BESZEL_PORT}"
-        info "  3. Скопируй Key из Beszel"
-    fi
-    echo ""
-    ask "Вставь Beszel KEY (ssh-ed25519 ...)"
-    read -r BESZEL_KEY </dev/tty
-    if [[ -z "$BESZEL_KEY" ]]; then
-        warn "Key не указан, пропускаю"
-        return 0
-    fi
-
-    # Открытый всему миру :45876 — такой же маркер флота, как и :2222 (H-1).
-    echo ""
-    info "К агенту подключается только хаб Beszel. Укажи его IP, чтобы UFW"
-    info "не публиковал порт ${BESZEL_PORT} всему интернету. 'any' — оставить открытым."
-    ask "IP хаба Beszel"
-    read -r BESZEL_HUB_IP </dev/tty
-    ufw delete allow "${BESZEL_PORT}/tcp" >/dev/null 2>&1 || true
-    if [[ "$BESZEL_HUB_IP" == "any" ]]; then
-        ufw allow "${BESZEL_PORT}/tcp" comment "Beszel agent (открыт всем)"
-        warn "Порт ${BESZEL_PORT} открыт всему интернету — маркер для сканеров"
-    elif valid_ipv4 "$BESZEL_HUB_IP"; then
-        ufw allow from "$BESZEL_HUB_IP" to any port "$BESZEL_PORT" proto tcp \
-            comment "Beszel hub"
-        ok "Beszel :${BESZEL_PORT} — только с ${BESZEL_HUB_IP}"
-    else
-        die "Нужен IPv4 хаба Beszel или 'any'"
-    fi
-
-    docker stop beszel-agent 2>/dev/null || true
-    docker rm beszel-agent 2>/dev/null || true
-    # Том НЕ удаляем: в нём fingerprint агента. Снос = повторное добавление
-    # ноды в хабе на каждом ре-запуске.
-    docker run -d \
-        --name beszel-agent \
-        --restart unless-stopped \
-        --network host \
-        -v /var/run/docker.sock:/var/run/docker.sock:ro \
-        -v beszel_agent_data:/var/lib/beszel-agent \
-        -e KEY="$BESZEL_KEY" \
-        -e LISTEN=":${BESZEL_PORT}" \
-        henrygd/beszel-agent:latest
-    local _tries=0
-    until docker ps --filter "name=^beszel-agent\$" --filter status=running \
-            --format '{{.Names}}' | grep -q .; do
-        _tries=$((_tries + 1))
-        (( _tries >= 6 )) && break
-        sleep 2
-    done
-    if docker ps --filter "name=^beszel-agent\$" --filter status=running \
-            --format '{{.Names}}' | grep -q .; then
-        ok "Beszel agent запущен на порту ${BESZEL_PORT}"
-        info "Проверь в Beszel UI: нода зелёная и есть fingerprint"
-    else
-        warn "Beszel agent не запустился. Проверь: docker logs beszel-agent"
-    fi
-}
-
 phase16_summary() {
     title "Фаза 16 / Готово!"
     # Ставим маркер: следующий запуск на этой ноде пропустит apt upgrade
@@ -2119,7 +2044,6 @@ main() {
     phase12_maintenance
     phase13_watchdog
     phase14_ufw
-    phase15_beszel
     phase16_summary
 }
 

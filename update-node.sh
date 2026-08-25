@@ -29,7 +29,6 @@ readonly LOG_FILE="/var/log/update-node.log"
 readonly NODE_TZ="${NODE_TZ:-Europe/Moscow}"
 DRY_RUN="${DRY_RUN:-0}"
 PANEL_IP="${PANEL_IP:-}"
-BESZEL_HUB_IP="${BESZEL_HUB_IP:-}"
 
 RED='\033[0;31m'; GREEN='\033[0;32m'; YELLOW='\033[1;33m'
 BLUE='\033[0;34m'; CYAN='\033[0;36m'; NC='\033[0m'
@@ -313,28 +312,22 @@ else
     die "PANEL_IP должен быть IPv4, 'any' или 'skip' (получено: '${PANEL_IP}')"
 fi
 
-# Beszel: спрашиваем, только если агент реально стоит и порт открыт всем.
-if ufw status 2>/dev/null | grep -qE "^${BESZEL_PORT}/tcp[[:space:]]+ALLOW( IN)?[[:space:]]+Anywhere"; then
-    # Спрашивать можно только при живом терминале. При запуске по ssh без -t
-    # (а именно так скрипт и гоняют по флоту) чтение из /dev/tty роняет прогон
-    # на ровном месте — в этом случае молча пропускаем, значение придёт из
-    # переменной BESZEL_HUB_IP.
-    if [[ -z "$BESZEL_HUB_IP" && "$PANEL_IP" != "skip" ]] && : >/dev/tty 2>/dev/null; then
-        info "Порт ${BESZEL_PORT} (Beszel) тоже открыт всем — такой же маркер."
-        ask "IP хаба Beszel (Enter — оставить как есть)"
-        read -r BESZEL_HUB_IP </dev/tty
-    fi
-    if valid_ipv4 "${BESZEL_HUB_IP:-}"; then
-        run ufw delete allow "${BESZEL_PORT}/tcp" || true
-        run ufw allow from "$BESZEL_HUB_IP" to any port "$BESZEL_PORT" proto tcp \
-            comment "Beszel hub"
-        ok "Beszel :${BESZEL_PORT} — только с ${BESZEL_HUB_IP}"
-        note "порт ${BESZEL_PORT} закрыт для всех, кроме хаба Beszel"
-    else
-        warn "порт ${BESZEL_PORT} остаётся открытым всему интернету"
-    fi
+# Beszel убран из проекта: хаб отключён, его роль выполняет Prometheus на
+# satx-us. На уже развёрнутых нодах агент и открытый порт остаются — снимаем.
+if docker ps -a --format '{{.Names}}' 2>/dev/null | grep -qx "beszel-agent"; then
+    run docker rm -f beszel-agent || true
+    # Том с fingerprint тоже больше не нужен: возвращаться в хаб нода не будет.
+    run docker volume rm beszel_agent_data || true
+    ok "Beszel agent удалён"
 else
-    skip "порт ${BESZEL_PORT} не открыт всем"
+    skip "Beszel agent не установлен"
+fi
+if ufw status 2>/dev/null | grep -qE "^${BESZEL_PORT}/tcp"; then
+    run ufw delete allow "${BESZEL_PORT}/tcp" || true
+    run ufw delete allow from any to any port "$BESZEL_PORT" proto tcp || true
+    ok "порт ${BESZEL_PORT} закрыт"
+else
+    skip "порт ${BESZEL_PORT} уже закрыт"
 fi
 
 # =============================================================================

@@ -238,8 +238,10 @@ if command -v ufw >/dev/null 2>&1 && ufw status >/dev/null 2>&1; then
     else
         pass "порт ${NODE_API_PORT} не открыт всем"
     fi
-    if grep -qE "^${BESZEL_PORT}/tcp[[:space:]]+ALLOW IN[[:space:]]+Anywhere" <<< "$UFWOUT"; then
-        warn "порт ${BESZEL_PORT} (Beszel) открыт всему интернету (H-1)"
+    # Beszel убран из проекта. Любой его след — забытый агент или открытый
+    # порт: и то, и другое лишнее, а открытый 45876 ещё и опознаёт флот.
+    if grep -qE "^${BESZEL_PORT}/tcp" <<< "$UFWOUT"; then
+        warn "порт ${BESZEL_PORT} остался от Beszel — закрыть: bash update-node.sh"
     fi
     if grep -qE "^${NGINX_FALLBACK_PORT}/tcp[[:space:]]+ALLOW IN" <<< "$UFWOUT"; then
         fail "порт ${NGINX_FALLBACK_PORT} (nginx-fallback) открыт наружу — прямой коннект без proxy_protocol даёт аномалию"
