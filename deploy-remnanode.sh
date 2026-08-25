@@ -88,6 +88,7 @@ readonly NODE_API_PORT=2222
 readonly NGINX_FALLBACK_PORT=8443
 readonly WEBROOT="/var/www/html"
 readonly OPT_DIR="/opt/remnanode"
+readonly REPO_RAW="https://raw.githubusercontent.com/anfixit/routerus/main"
 readonly STATE_MARKER="${OPT_DIR}/.deployed"   # флаг «уже разворачивали»
 readonly NODE_INFO="${OPT_DIR}/node-info.txt"  # шпаргалка по ноде для оператора
 
@@ -599,6 +600,15 @@ phase2_deps() {
         || die "Нужен docker compose v2 (плагин docker-compose-plugin). Установи его и повтори."
 
     configure_docker_logging
+
+    # Проверяльщик кладём сразу: в конце установки он предлагается одним
+    # вопросом, и отправлять человека за ним в интернет в этот момент — лишнее.
+    if wget -q -O "${OPT_DIR}/check-node.sh" "${REPO_RAW}/check-node.sh" 2>/dev/null; then
+        chmod 700 "${OPT_DIR}/check-node.sh"
+        ok "check-node.sh скачан: ${OPT_DIR}/check-node.sh"
+    else
+        warn "check-node.sh не скачался — возьмёшь позже вручную"
+    fi
 }
 
 configure_docker_logging() {
@@ -1507,6 +1517,42 @@ host_block() {
 
 # Единый последовательный чек-лист. Раньше он печатался двумя кусками вокруг
 # запроса SECRET_KEY и читался вразнобой: оператор терял место, где остановился.
+# --- Пошаговый разговор о настройке панели -----------------------------------
+#
+# Раньше все шесть шагов вываливались одной простынёй одного цвета: человек
+# уходил в браузер, терминал прокручивался, и вернувшись он не понимал, где
+# остановился. Теперь каждый шаг — отдельный экран с подтверждением, а те,
+# что можно проверить машинно, проверяются, а не спрашиваются на слово.
+
+shag() {
+    local nomer="$1" zagolovok="$2"
+    # Ширину считаем в символах, а не в байтах: printf "%-49s" ломает рамку
+    # на кириллице — каждая буква занимает два байта, и правый край уезжает.
+    local shirina=49 dlina=${#zagolovok} otstup
+    otstup=$(( shirina - dlina ))
+    (( otstup < 0 )) && otstup=0
+    echo ""
+    echo -e "${BLUE}╔══════════════════════════════════════════════════════════════╗${NC}"
+    echo -e "${BLUE}║${NC}  ${GREEN}ШАГ ${nomer}${NC}$(printf '%*s' $(( 3 - ${#nomer} )) '')  ${zagolovok}$(printf '%*s' "$otstup" '')${BLUE}║${NC}"
+    echo -e "${BLUE}╚══════════════════════════════════════════════════════════════╝${NC}"
+}
+
+# Пауза до подтверждения. Без неё человек листает дальше, не сделав шаг, и
+# обнаруживает это через два экрана.
+gotovo() {
+    local vopros="${1:-Сделано?}"
+    echo ""
+    while :; do
+        ask "$vopros (Enter — дальше, q — прервать)"
+        local otvet; read -r otvet </dev/tty
+        case "$otvet" in
+            ""|y|Y|д|Д) return 0 ;;
+            q|Q) die "Прервано на настройке панели. Чек-лист: ${OPT_DIR}/panel-setup.txt" ;;
+            *) warn "Не понял. Enter — дальше, q — прервать" ;;
+        esac
+    done
+}
+
 panel_checklist() {
     local n ports
     n=$(host_count); ports=$(inbound_ports_re)
@@ -1619,13 +1665,10 @@ PSEOF
 }
 
 phase10_panel() {
-    title "Фаза 10 / Настройка в панели Remnawave"
-    echo ""
-    echo -e "${YELLOW}$(panel_checklist)${NC}"
-    echo ""
+    title "Фаза 10 / Панель: профиль и ключ ноды"
 
-    # Чек-лист в файл: он нужен ровно тогда, когда оператор ушёл в браузер,
-    # а терминал прокрутился.
+    # Чек-лист целиком — в файл. Он нужен ровно тогда, когда человек ушёл в
+    # браузер, а терминал прокрутился.
     local SETUP="${OPT_DIR}/panel-setup.txt"
     {
         echo "# Сгенерировано $(date '+%F %T %Z') скриптом v${SCRIPT_VERSION}"
@@ -1633,10 +1676,34 @@ phase10_panel() {
         panel_checklist
     } > "$SETUP"
     chmod 600 "$SETUP"
-    ok "Чек-лист сохранён: ${SETUP} (открыть: cat ${SETUP})"
+
+    shag 1 "Config Profiles → Create"
+    echo ""
+    info "Имя профиля: ${NODE_NAME}"
+    info "Ниже — JSON целиком. Скопируй его и вставь в панель."
+    info "Он же лежит на ноде: ${OPT_DIR}/config-profile.json"
+    echo ""
+    echo -e "${GREEN}$(cat "${OPT_DIR}/config-profile.json")${NC}"
+    echo ""
+    info "После сохранения в профиле должно быть $(host_count) inbound:"
+    info "    $(inbound_list)"
+    gotovo "Профиль создан?"
+
+    shag 2 "Nodes → Create"
+    echo ""
+    info "Название:  ${NODE_NAME}"
+    info "Адрес:     ${SERVER_IP}"
+    info "Порт:      ${NODE_API_PORT}"
+    info "Профиль:   ${NODE_NAME}   (из шага 1)"
+    echo ""
+    warn "Панель покажет инбаунды профиля с переключателями."
+    warn "ВКЛЮЧИ ВСЕ $(host_count) — нода поднимает только отмеченные."
+    if [[ "$TRANSPORT" == "both" ]]; then
+        warn "Пропустишь второй — нода будет зелёной, а порт 443 мёртвым."
+    fi
     echo ""
 
-    # Ре-запуск гонял оператора в панель за ключом ноды, которая и так работает,
+    # Ре-запуск гонял в панель за ключом ноды, которая и так работает,
     # хотя значение лежит в .env рядом (M-8).
     SECRET_KEY=""
     if [[ -f "${OPT_DIR}/.env" ]] && grep -q '^SECRET_KEY=' "${OPT_DIR}/.env"; then
@@ -1652,12 +1719,92 @@ phase10_panel() {
         fi
     fi
     if [[ -z "$SECRET_KEY" ]]; then
-        info "Сделай ШАГИ 1 и 2, затем вставь SECRET_KEY из шага 2."
-        info "Шаги 3-6 выполнишь после того, как скрипт закончит работу."
+        info "Сохрани ноду и скопируй SECRET_KEY."
         ask "SECRET_KEY из панели"
         read -r SECRET_KEY </dev/tty
-        if [[ -z "$SECRET_KEY" ]]; then die "SECRET_KEY не может быть пустым"; fi
+        [[ -n "$SECRET_KEY" ]] || die "SECRET_KEY не может быть пустым"
         ok "SECRET_KEY принят"
+    fi
+    echo ""
+}
+
+# Вторая половина разговора: она идёт ПОСЛЕ запуска контейнера, иначе
+# проверять «поднялась ли нода» было бы нечего.
+phase15_panel_finish() {
+    title "Фаза 15 / Панель: хосты, сквад, проверка"
+
+    shag 3 "Нода поднялась?"
+    echo ""
+    # Спрашивать на слово нечего: порты видно отсюда.
+    local ports_re n_ports i
+    ports_re=$(inbound_ports_re)
+    for i in 1 2 3 4 5 6; do
+        n_ports=$(ss -tlnp 2>/dev/null | grep -cE ":(${ports_re})[[:space:]]" || true)
+        [[ "$n_ports" -ge "$(host_count)" ]] && break
+        sleep 5
+    done
+    if [[ "$n_ports" -ge "$(host_count)" ]]; then
+        ok "Xray слушает ${n_ports} из $(host_count) портов — нода поднялась"
+    else
+        warn "Xray слушает ${n_ports} из $(host_count). Обычные причины:"
+        warn "  • в шаге 2 включены не все инбаунды профиля;"
+        warn "  • SECRET_KEY вставлен не тот."
+        info "Посмотреть, что говорит нода: docker logs --tail 50 ${NODE_CONTAINER:-remnawave-node}"
+        gotovo "Разобрался, идём дальше?"
+    fi
+    echo ""
+    info "Панель показывает ноду зелёной, если отвечает её API на ${NODE_API_PORT}."
+    info "Про сам VPN это не говорит ничего — поэтому проверяем порты, а не цвет."
+
+    shag 4 "Hosts → Create (нужно $(host_count))"
+    echo ""
+    if [[ "$(host_count)" == 2 ]]; then
+        warn "ОТДЕЛЬНЫЙ хост на КАЖДЫЙ inbound."
+        warn "Один хост на два не работает: подписка отдаёт по ссылке на хост."
+        echo ""
+    fi
+    case "$TRANSPORT" in
+        both)  host_block 1 2 tcp 443; echo ""; host_block 2 2 xhttp "$XHTTP_PORT" ;;
+        xhttp) host_block 1 1 xhttp 443 ;;
+        *)     host_block 1 1 tcp 443 ;;
+    esac
+    echo ""
+    info "Проще всего: открой РАБОЧИЙ хост другой ноды и скопируй настройки,"
+    info "поменяв адрес, порт и inbound. Так поля не разъедутся."
+    gotovo "Хосты созданы?"
+
+    shag 5 "Internal Squads → Default-Squad"
+    echo ""
+    info "Добавь инбаунды: $(inbound_list)"
+    echo ""
+    warn "Без этого шага нода НЕ попадёт в подписку и не появится в клиенте,"
+    warn "при том что в панели будет числиться зелёной."
+    gotovo "Инбаунды добавлены в сквад?"
+
+    shag 6 "Проверка"
+    echo ""
+    info "Публичный ключ этой ноды:"
+    secret "    $(awk -F= '/^PUBLIC_KEY=/{print $2; exit}' "${OPT_DIR}/keys.txt" 2>/dev/null)"
+    info "Сверь его с pbk= в ссылке подписки — значения обязаны совпадать."
+    info "Не совпало → хост держит устаревшую запись инбаунда, пересоздай хост."
+    echo ""
+    info "На устройстве обнови подписку ВРУЧНУЮ: клиенты кешируют ссылки и"
+    info "подхватывают правки в разное время. Отсюда «на телефоне работает,"
+    info "на компьютере нет»."
+    echo ""
+
+    if [[ -x "${OPT_DIR}/check-node.sh" || -f "${OPT_DIR}/check-node.sh" ]]; then
+        ask "Запустить полную проверку ноды сейчас? (y/n) [y]"
+        local _run; read -r _run </dev/tty
+        if [[ -z "$_run" || "$_run" == "y" ]]; then
+            echo ""
+            bash "${OPT_DIR}/check-node.sh" || true
+        else
+            info "Позже: sudo bash ${OPT_DIR}/check-node.sh"
+        fi
+    else
+        warn "check-node.sh не скачался. Взять вручную:"
+        info "  wget -O check-node.sh ${REPO_RAW}/check-node.sh"
     fi
     echo ""
 }
@@ -2013,18 +2160,11 @@ NIEOF
     echo -e "${YELLOW}  ⚠ SSH-порт этой ноды — ${SSH_PORT}. Он случайный и НЕ совпадает${NC}"
     echo -e "${YELLOW}    с другими нодами. Занеси его в свой реестр: ${NODE_INFO}${NC}"
     echo ""
-    echo -e "${YELLOW}  ⚠ Заверши настройку в панели Remnawave. Чек-лист никуда не делся:${NC}"
-    echo -e "${YELLOW}      cat ${OPT_DIR}/panel-setup.txt${NC}"
-    if [[ "$TRANSPORT" == "both" ]]; then
-        echo -e "${YELLOW}    Не забудь: хостов нужно ДВА (tcp:443 и xhttp:${XHTTP_PORT}),${NC}"
-        echo -e "${YELLOW}    и оба inbound — в Internal Squad.${NC}"
-    fi
-    echo ""
-    info "Чек-лист: ${OPT_DIR}/panel-setup.txt"
+    info "Шаги панели: ${OPT_DIR}/panel-setup.txt (если понадобится вернуться)"
     info "Ключи:    ${OPT_DIR}/keys.txt"
     info "Инфо:     ${NODE_INFO}"
     info "Лог:      $LOG_FILE (chmod 600, без приватного ключа)"
-    info "Проверка: bash check-node.sh (из репозитория routerus)"
+    info "Проверка: sudo bash ${OPT_DIR}/check-node.sh"
     echo ""
 }
 
@@ -2044,6 +2184,7 @@ main() {
     phase12_maintenance
     phase13_watchdog
     phase14_ufw
+    phase15_panel_finish
     phase16_summary
 }
 
