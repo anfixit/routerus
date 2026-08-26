@@ -9,7 +9,7 @@ VLESS · Reality · steal_oneself · транспорт TCP/Vision, XHTTP или
 [![Shell](https://img.shields.io/badge/shell-bash-4EAA25?logo=gnubash&logoColor=white)](#)
 [![Ubuntu](https://img.shields.io/badge/Ubuntu-24.04-E95420?logo=ubuntu&logoColor=white)](#требования)
 [![Xray-core](https://img.shields.io/badge/Xray--core-26.6.27%2B-blue)](https://github.com/XTLS/Xray-core)
-[![Remnawave](https://img.shields.io/badge/Remnawave-2.8.0%2B-6E56CF)](https://github.com/remnawave/panel)
+[![Remnawave](https://img.shields.io/badge/Remnawave-3.3.2%2B-6E56CF)](https://github.com/remnawave/panel)
 [![ShellCheck](https://img.shields.io/badge/ShellCheck-passing-brightgreen?logo=gnu)](https://www.shellcheck.net/)
 [![License: MIT](https://img.shields.io/badge/License-MIT-green.svg)](LICENSE)
 
@@ -85,8 +85,8 @@ VLESS + Reality, маскирует ноду под легитимный сай�
 | ОС            | чистая Ubuntu 24.04+ с выделенным IPv4        |
 | Порт 443      | свободен до установки (Xray слушает напрямую) |
 | Домен         | A-запись указывает на IP сервера              |
-| Remnawave     | Panel 2.8.0+                                   |
-| Node / Xray   | Node 2.8.0+ (Xray-core 26.6.27 в образе)      |
+| Remnawave     | Panel 3.3.2+                                   |
+| Node / Xray   | Node 3.3.2+ (Xray-core 26.6.27 в образе)      |
 | Права         | root на время установки                       |
 
 ## Быстрый старт
@@ -152,7 +152,7 @@ macOS/Linux (`cat ~/.ssh/id_ed25519.pub`) и Windows
 
 ```bash
 # пин образа ноды (по умолчанию remnawave/node:latest)
-REMNANODE_IMAGE=remnawave/node:2.8.0 bash deploy.sh
+REMNANODE_IMAGE=remnawave/node:3.3.2 bash deploy.sh
 # пин образа для генерации ключей (по умолчанию :latest)
 XRAY_KEYGEN_IMAGE=ghcr.io/xtls/xray-core:26.6.27 bash deploy.sh
 # email для Let's Encrypt (по умолчанию регистрация без email)
@@ -242,10 +242,10 @@ Censys или Shodan. Открытый `9100` выдаёт имя хоста, д
 
 ## Настройка в панели Remnawave
 
-> Актуально для Panel 2.8.0. Учти изменения хостов в этой версии: единый `tag`
-> заменён на массив `tags[]`; `allowInsecure` убран; фиксированные значения
-> `fingerprint` больше не enum — это свободная строка (`chrome` по-прежнему
-> валиден); ALPN поддерживает `h2`, `h3` и комбинации.
+> Проверено на Panel 3.3.2. Поля хостов приняли нынешний вид ещё в 2.8.0 и с
+> тех пор не менялись: единый `tag` заменён массивом `tags[]`; `allowInsecure`
+> убран; `fingerprint` больше не enum, а свободная строка (`chrome`
+> по-прежнему валиден); ALPN поддерживает `h2`, `h3` и комбинации.
 
 1. **Config Profiles → Create** — вставить JSON из вывода скрипта.
 2. **Nodes → Create** — Address = IP сервера, Port `2222`, привязать профиль,
@@ -281,8 +281,8 @@ TCP + Vision выбран по умолчанию ради маршрутиза�
 (podkop / Nikki) парсит ссылку подписки Remnawave с `flow=xtls-rprx-vision`
 без доработок.
 
-> **Начиная с Panel/Node 2.8.0** Remnawave умеет генерировать XHTTP- и
-> Hysteria2-подписки и для клиентов на ядре **Mihomo** (полный набор xmux,
+> **С версии 2.8.0** Remnawave генерирует XHTTP- и Hysteria2-подписки и для
+> клиентов на ядре **Mihomo** (полный набор xmux,
 > download-settings и padding). Если твоя сборка podkop собрана со свежим
 > mihomo — XHTTP на роутере становится реально применим; проверяй на своей
 > прошивке перед раскаткой на флот.
@@ -335,7 +335,7 @@ sudo bash check-node.sh
 
 Ядро Xray живёт **внутри** docker-образа `remnawave/node`, а Reality-конфиг
 хранится в панели, не на ноде. Поэтому при выходе новой версии ядра
-(например, Node 2.8.0 → Xray-core 26.6.27) **полная пересборка не нужна** —
+(например, Node 3.3.2 → Xray-core 26.6.27) **полная пересборка не нужна** —
 достаточно подтянуть свежий образ. Хардинг, nginx, SSH и ключи не затрагиваются.
 
 ```bash
@@ -426,8 +426,8 @@ cd /opt/remnanode && docker compose pull && docker compose up -d
 **Почему TCP по умолчанию, а не XHTTP?**
 TCP + Vision совместим со всеми клиентами и стабилен. XHTTP (`packet-up`)
 устойчивее к поведенческому DPI на мобильных сетях, но с частью клиентов на
-mihomo исторически менее надёжен — хотя в Panel 2.8.0 поддержка Mihomo+XHTTP
-уже появилась. Выбор остаётся за тобой при запуске.
+mihomo исторически менее надёжен — хотя поддержка Mihomo+XHTTP появилась
+ещё в 2.8.0. Выбор остаётся за тобой при запуске.
 
 **Зачем режим `both`?**
 Одна нода отдаёт и tcp (для podkop/флота), и xhttp (для клиентов за жёстким
@@ -499,6 +499,7 @@ pull && docker compose up -d`. Reality-конфиг, ключи и хардин�
 
 | Версия | Изменения                                                        |
 |--------|------------------------------------------------------------------|
+| v3.11  | Настройка панели стала **пошаговой**: шесть отдельных экранов с подтверждением вместо простыни одного цвета — шаги 3-6 больше не откладываются «на потом», из-за чего нода оставалась без хостов и сквада, зелёной в панели и мёртвой для клиента. JSON профиля печатается **до** запроса `SECRET_KEY`; «нода поднялась?» проверяется по числу слушающих портов, а не вопросом; `check-node.sh` скачивается заранее и запускается одним ответом. `sniffing.routeOnly` и убранный `quic` доехали до генерируемого JSON — комментарий обещал их с v3.10, но в конфиге их не было. **Beszel убран целиком** (агент оставался службой и держал открытым `45876`). Запуск в README разбит на отдельные команды: `bash <(wget …)` подвешивал установку |
 | v3.10  | Аудит (3 блокера, 6 высоких, 10 средних, 16 минорных). **Приватные сети → `BLOCK`** вместо `DIRECT` (SSRF с ноды: cloud-metadata, внутренняя сеть хостера, собственный API в обход UFW); watchdog проверяет **реальный inbound**, а не наличие контейнера; geo-машинерия убрана целиком вместе с ночным `--force-recreate` всего флота; `2222`/`45876` закрыты по источнику; `sniffing.routeOnly`; нефильтрующий DNS; рестарт fail2ban после `ufw` (цепочки `f2b-*` не восстанавливались); `authorized_keys` дополняется; пауза на подтверждение SSH; случайный SSH-порт на ноду; рандомизация структуры лендинга; идемпотентная генерация ключей; `set -E`; валидация домена; `jq`-мёрдж `daemon.json`; сохранение пина образа; дроп-ин unattended-upgrades; проверка срока сертификата. Новые скрипты `update-node.sh` и `check-node.sh` |
 | v3.9   | UX + аудит: выбор транспорта цифрой `1`/`2`/`3`, SSH-примеры для Windows/Linux/macOS, Docker из подписанного apt-репо (+ гарантия compose v2), проверка свободного `:443`, `head -1` в парсинге ключа, устойчивая fallback-цепочка keygen, `check_internet` без ICMP-маскировки, поллинг старта контейнеров вместо `sleep`, `45876` в списке занятых портов |
 | v3.8   | Аудит: privateKey убран из лога (JSON → `config-profile.json` 600), SSH-хардинг в `00-hardening.conf` (пароли реально off), nginx-fallback только loopback + порт убран из UFW, фикс зависания phase2 (needrestart/lock), renewal пересоздаёт ноду, обязательный `geoip.dat`, `bittorrent → BLOCK`, пин образа `REMNANODE_IMAGE` |
