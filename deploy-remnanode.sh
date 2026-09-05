@@ -15,7 +15,7 @@
 #
 # Changelog v3.13 (сверка флота):
 #   - Шаг 4 настройки панели печатает теги хостов для балансировщика по
-#     странам (CC_WIFI для Reality, CC_MOB для XHTTP), исключение из XRAY_JSON
+#     странам (CC_MOB для TCP Reality, CC_WIFI для XHTTP), исключение из XRAY_JSON
 #     и памятку про виртуальные хосты для новой страны.
 #   - Reality: явный minClientVer 1.8.0. В Xray 26.x умолчание 26.3.27, и
 #     клиенты со старым ядром (v2RayTun, часть Happ, sing-box роутеров)
@@ -1604,10 +1604,13 @@ host_block() {
     cc=$(echo "${NODE_NAME}" | grep -oE -- '-[A-Za-z]{2}(-[0-9]+)?$' | grep -oE '[A-Za-z]{2}' | head -1)
     [[ -z "$cc" ]] && cc=$(echo "${NODE_NAME}" | grep -oE '^[A-Za-z]{2}')
     cc=$(echo "$cc" | tr '[:lower:]' '[:upper:]')
+    # На флоте значок привязан к транспорту, а не к порту: TCP Reality всегда
+    # «лучше с мобильного 🌐» (тег CC_MOB), XHTTP всегда «лучше с Wi-Fi и ПК 🛜»
+    # (тег CC_WIFI). Порты у половины нод обратные, но смысл значка один.
     if [[ "$kind" == "tcp" ]]; then
-        echo "      Тег:         ${cc:-XX}_WIFI      (Reality на 443: «лучше с Wi-Fi 🛜»)"
+        echo "      Тег:         ${cc:-XX}_MOB       (TCP Reality: «лучше с мобильного 🌐»)"
     else
-        echo "      Тег:         ${cc:-XX}_MOB       (XHTTP на ${port}: «лучше с мобильного 🌐»)"
+        echo "      Тег:         ${cc:-XX}_WIFI      (XHTTP: «лучше с Wi-Fi и ПК 🛜»)"
     fi
     echo "      Исключить из подписок: XRAY_JSON   (Advanced → Exclude from subscription types)"
     echo "      Если это ПЕРВАЯ нода страны ${cc:-XX}: создай ещё два виртуальных хоста"
