@@ -1598,7 +1598,12 @@ host_block() {
     # с …)», внутрь которого шаблон Country balancer подтягивает реальные
     # хосты по тегу. Без тега нода в балансировщик не попадёт, без
     # исключения из XRAY_JSON покажется в списке второй раз, отдельной строкой.
-    local cc; cc=$(echo "${NODE_NAME}" | grep -oE '^[A-Za-z]{2}' | tr '[:lower:]' '[:upper:]')
+    # Код страны: для имён «хостер-страна» (toolvps-nl, satx-de-1) берём
+    # двухбуквенный кусок после дефиса, для старых «DE_natty_narwhal» — префикс.
+    local cc
+    cc=$(echo "${NODE_NAME}" | grep -oE -- '-[A-Za-z]{2}(-[0-9]+)?$' | grep -oE '[A-Za-z]{2}' | head -1)
+    [[ -z "$cc" ]] && cc=$(echo "${NODE_NAME}" | grep -oE '^[A-Za-z]{2}')
+    cc=$(echo "$cc" | tr '[:lower:]' '[:upper:]')
     if [[ "$kind" == "tcp" ]]; then
         echo "      Тег:         ${cc:-XX}_WIFI      (Reality на 443: «лучше с Wi-Fi 🛜»)"
     else
