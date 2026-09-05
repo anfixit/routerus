@@ -14,6 +14,9 @@
 # а состояние ноды показывает check-node.sh (оба в этом же репозитории).
 #
 # Changelog v3.13 (сверка флота):
+#   - Порты в режиме both: XHTTP на 443, TCP Reality на 8444. Так стояли
+#     девять нод из четырнадцати и так обещает страница помощи («🛜 идёт по
+#     443»); скрипт ставил наоборот, и флот жил в двух стандартах.
 #   - Шаг 4 настройки панели печатает теги хостов для балансировщика по
 #     странам (CC_MOB для TCP Reality, CC_WIFI для XHTTP), исключение из XRAY_JSON
 #     и памятку про виртуальные хосты для новой страны.
@@ -1496,8 +1499,11 @@ KEYSEOF
     local INBOUNDS
     case "$TRANSPORT" in
         both)
-            INBOUNDS="$(build_inbound "${NODE_NAME}_tcp" 443 tcp),
-$(build_inbound "${NODE_NAME}_xhttp" "$XHTTP_PORT" xhttp)"
+            # Стандарт флота с 05.09.2026: XHTTP на 443 («лучше с Wi-Fi и ПК 🛜»,
+            # проходит в строгих сетях), TCP Reality на XHTTP_PORT (8444,
+            # «лучше с мобильного 🌐»). До этого половина нод стояла наоборот.
+            INBOUNDS="$(build_inbound "${NODE_NAME}_tcp" "$XHTTP_PORT" tcp),
+$(build_inbound "${NODE_NAME}_xhttp" 443 xhttp)"
             ;;
         xhttp)
             INBOUNDS="$(build_inbound "${NODE_NAME}_xhttp" 443 xhttp)"
@@ -1707,7 +1713,7 @@ PSEOF
         echo ""
     fi
     case "$TRANSPORT" in
-        both)  host_block 1 2 tcp 443; echo ""; host_block 2 2 xhttp "$XHTTP_PORT" ;;
+        both)  host_block 1 2 tcp "$XHTTP_PORT"; echo ""; host_block 2 2 xhttp 443 ;;
         xhttp) host_block 1 1 xhttp 443 ;;
         *)     host_block 1 1 tcp 443 ;;
     esac
@@ -1762,7 +1768,7 @@ PSEOF
 PSEOF
     if [[ "$TRANSPORT" == "both" ]]; then
         echo ""
-        echo "   Ссылок на эту ноду должно быть ДВЕ: порт 443 и ${XHTTP_PORT}."
+        echo "   Ссылок на эту ноду должно быть ДВЕ: xhttp на 443 и tcp на ${XHTTP_PORT}."
     fi
     echo ""
     echo "============================================================"
@@ -1868,7 +1874,7 @@ phase15_panel_finish() {
         echo ""
     fi
     case "$TRANSPORT" in
-        both)  host_block 1 2 tcp 443; echo ""; host_block 2 2 xhttp "$XHTTP_PORT" ;;
+        both)  host_block 1 2 tcp "$XHTTP_PORT"; echo ""; host_block 2 2 xhttp 443 ;;
         xhttp) host_block 1 1 xhttp 443 ;;
         *)     host_block 1 1 tcp 443 ;;
     esac
@@ -2265,7 +2271,7 @@ NIEOF
     echo -e "${GREEN}║  Нода:        ${NODE_NAME}${NC}"
     echo -e "${GREEN}║  Транспорт:   ${TRANSPORT}${NC}"
     [[ "$TRANSPORT" == "both" ]] && \
-        echo -e "${GREEN}║  Порты:       tcp:443 + xhttp:${XHTTP_PORT}${NC}"
+        echo -e "${GREEN}║  Порты:       xhttp:443 + tcp:${XHTTP_PORT}${NC}"
     echo -e "${GREEN}║  SSH:         ssh -p ${SSH_PORT} admin@${SERVER_IP}${NC}"
     echo -e "${GREEN}╚══════════════════════════════════════════════════════════════╝${NC}"
     secret "Private Key: ${PRIVATE_KEY}"
