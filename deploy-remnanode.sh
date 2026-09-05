@@ -13,6 +13,17 @@
 # Для УЖЕ развёрнутых нод правки этой версии накатывает update-node.sh,
 # а состояние ноды показывает check-node.sh (оба в этом же репозитории).
 #
+# Changelog v3.12 (продление сертификатов):
+#   - Ноды, поднятые до v3.7, хранили в cli.ini и в renewal/*.conf хуки
+#     «systemctl stop nginx» из времён standalone. С webroot они самоубийственны:
+#     nginx гасится ровно перед тем, как Let's Encrypt приходит за файлом, и
+#     продление годами падало с Connection refused. Теперь фаза 6 снимает эти
+#     хуки везде, переводит сертификаты с плагина nginx на webroot и возвращает
+#     nginx под systemd (плагин поднимал его мимо systemd).
+#   - Renewal-hook пересоздаёт контейнер только если compose монтирует
+#     letsencrypt; когда TLS терминирует nginx, достаточно reload.
+#   - update-node.sh накатывает то же на живой флот; check-node.sh ловит
+#     хуки-убийцы, 301 вместо ACME-пути и упавший certbot.service.
 # Changelog v3.11:
 #   - Настройка панели стала пошаговой: шесть отдельных экранов вместо одной
 #     простыни. Шаги 3-6 больше не откладываются «на потом» — раньше нода
@@ -96,7 +107,7 @@
 set -Eeuo pipefail
 
 # --- Константы (единый источник истины) --------------------------------------
-readonly SCRIPT_VERSION="3.11"
+readonly SCRIPT_VERSION="3.12"
 readonly LOG_FILE="/var/log/deploy-remnanode.log"
 readonly NODE_API_PORT=2222
 readonly NGINX_FALLBACK_PORT=8443
@@ -940,8 +951,48 @@ RDEOF
         rm -f /etc/letsencrypt/cli.ini
         info "Убран глобальный cli.ini прошлых версий (влиял на все сертификаты хоста)"
     fi
+    fix_renewal_config
     systemctl enable certbot.timer 2>/dev/null || true
     ok "Автопродление SSL: webroot (recreate ноды — renewal-hook из фазы 11)"
+}
+
+# Наследие нод, поднятых до v3.7 (standalone): хуки «systemctl stop nginx» в
+# cli.ini и внутри renewal/*.conf, сертификаты через плагин nginx. С webroot
+# такой хук гасит nginx ровно перед проверкой Let's Encrypt — продление падало
+# с Connection refused, пока сертификат не истекал. Плагин nginx вдобавок
+# поднимал nginx мимо systemd, и «systemctl is-active» врал «inactive».
+fix_renewal_config() {
+    local changed=0 conf name
+    if [[ -f /etc/letsencrypt/cli.ini ]] \
+        && grep -qE '^(pre-hook|post-hook|authenticator|webroot-path)\s*=' /etc/letsencrypt/cli.ini; then
+        backup_file /etc/letsencrypt/cli.ini
+        sed -i -E '/^(pre-hook|post-hook|authenticator|webroot-path)\s*=/d' /etc/letsencrypt/cli.ini
+        grep -qvE '^\s*(#|$)' /etc/letsencrypt/cli.ini || rm -f /etc/letsencrypt/cli.ini
+        changed=1
+    fi
+    for conf in /etc/letsencrypt/renewal/*.conf; do
+        [[ -f "$conf" ]] || continue
+        name=$(basename "$conf" .conf)
+        if grep -qE '^(pre_hook|post_hook)\s*=' "$conf"; then
+            backup_file "$conf"
+            sed -i -E '/^(pre_hook|post_hook)\s*=/d' "$conf"
+            changed=1
+        fi
+        if grep -qE '^authenticator\s*=\s*nginx' "$conf"; then
+            backup_file "$conf"
+            sed -i -E 's/^authenticator\s*=.*/authenticator = webroot/; /^installer\s*=/d; /^webroot_path\s*=/d' "$conf"
+            sed -i '/^\[\[webroot_map\]\]/,$d' "$conf"
+            printf 'webroot_path = %s,\n[[webroot_map]]\n%s = %s\n' "$WEBROOT" "$name" "$WEBROOT" >> "$conf"
+            changed=1
+        fi
+    done
+    if ! systemctl is-active --quiet nginx && pgrep -x nginx >/dev/null; then
+        nginx -s quit 2>/dev/null || true; sleep 2; pkill -x nginx 2>/dev/null || true
+        systemctl enable --now nginx
+        changed=1
+    fi
+    (( changed )) && info "Продление приведено к webroot: сняты хуки stop nginx, nginx под systemd"
+    return 0
 }
 
 phase7_nginx() {
@@ -1907,10 +1958,15 @@ DCEOF
     # ПРИМЕЧАНИЕ: certbot запускает deploy-хук только при renew, НЕ при первичной
     # выдаче. Для первого деплоя ноду уже поднял этот же phase11 выше — ок.
     mkdir -p /etc/letsencrypt/renewal-hooks/deploy
+    # Пересоздаём только если контейнер вообще монтирует letsencrypt: на нодах,
+    # где TLS терминирует nginx, а Xray слушает без сертификата, рвать
+    # соединения ради файла, который он не читает, незачем.
     cat > /etc/letsencrypt/renewal-hooks/deploy/remnanode.sh << RHEOF
 #!/bin/bash
 systemctl reload nginx
-cd ${OPT_DIR} && docker compose up -d --force-recreate
+if grep -q letsencrypt ${OPT_DIR}/docker-compose.yml 2>/dev/null; then
+    cd ${OPT_DIR} && docker compose up -d --force-recreate
+fi
 RHEOF
     chmod +x /etc/letsencrypt/renewal-hooks/deploy/remnanode.sh
     ok "Renewal-hook: recreate ноды при продлении сертификата"

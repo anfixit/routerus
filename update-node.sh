@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # =============================================================================
-# update-node.sh v3.11 — накатывает правки аудита на УЖЕ развёрнутую ноду.
+# update-node.sh v3.12 — накатывает правки аудита на УЖЕ развёрнутую ноду.
 #
 # Зачем отдельный скрипт: часть находок (BLK-2, BLK-3, H-1, H-4, L-1, L-4)
 # живёт на самой ноде, а не в панели, и не ждёт следующего деплоя. Проходить
@@ -12,8 +12,10 @@
 #   sudo PANEL_IP=1.2.3.4 DRY_RUN=1 bash update-node.sh   # только показать
 #
 # Скрипт идемпотентен: повторный запуск ничего не ломает и не дублирует.
-# НЕ трогает: ключи Reality, SECRET_KEY, домен, сертификаты, SSH-порт,
+# НЕ трогает: ключи Reality, SECRET_KEY, домен, сами сертификаты, SSH-порт,
 # образ ноды и docker-compose.yml. Пересоздания контейнера не делает.
+# Продление сертификатов чинит (хуки, webroot, ACME-путь, renewal-hook),
+# но ничего не перевыпускает: срок проверит certbot.timer в своё время.
 #
 # ЧЕГО ОН НЕ УМЕЕТ. BLK-1 (приватные сети → BLOCK) и H-2 (sniffing.routeOnly)
 # живут в Config Profile в ПАНЕЛИ, а не на ноде. Их правит человек, скрипт лишь
@@ -479,6 +481,98 @@ else
 fi
 
 # =============================================================================
+title "6b / Продление сертификата: без остановки nginx"
+# Ноды до v3.7 несут хуки «systemctl stop nginx» в cli.ini и в renewal/*.conf,
+# сертификаты через плагин nginx и :80 без пути ACME (301 на Reality). Любого
+# из трёх хватает, чтобы certbot.timer падал каждый день, пока сертификат не
+# истечёт. На флоте в сентябре 2026 таких нод было девять из четырнадцати.
+LE=/etc/letsencrypt; WEBROOT=/var/www/html
+if [[ -d $LE/renewal ]]; then
+    if [[ -f $LE/cli.ini ]] && grep -qE '^(pre-hook|post-hook|authenticator|webroot-path)\s*=' $LE/cli.ini; then
+        run cp -a $LE/cli.ini "/root/cli.ini.bak.$(date +%s)"
+        run sed -i -E '/^(pre-hook|post-hook|authenticator|webroot-path)\s*=/d' $LE/cli.ini
+        ok "cli.ini: сняты хуки stop nginx"; note "cli.ini без хуков остановки nginx"
+    else
+        skip "cli.ini без хуков"
+    fi
+    for conf in $LE/renewal/*.conf; do
+        [[ -f "$conf" ]] || continue
+        name=$(basename "$conf" .conf)
+        if grep -qE '^(pre_hook|post_hook)\s*=' "$conf"; then
+            run cp -a "$conf" "/root/${name}.conf.bak.$(date +%s)"
+            run sed -i -E '/^(pre_hook|post_hook)\s*=/d' "$conf"
+            ok "${name}: сняты pre/post_hook"; note "${name}: renewal без хуков остановки nginx"
+        fi
+        if grep -qE '^authenticator\s*=\s*nginx' "$conf"; then
+            run cp -a "$conf" "/root/${name}.conf.bak.$(date +%s)"
+            run sed -i -E 's/^authenticator\s*=.*/authenticator = webroot/; /^installer\s*=/d; /^webroot_path\s*=/d' "$conf"
+            run sed -i '/^\[\[webroot_map\]\]/,$d' "$conf"
+            if (( ! DRY_RUN )); then
+                printf 'webroot_path = %s,\n[[webroot_map]]\n%s = %s\n' "$WEBROOT" "$name" "$WEBROOT" >> "$conf"
+            fi
+            ok "${name}: плагин nginx → webroot"; note "${name}: продление через webroot"
+        fi
+    done
+    run mkdir -p "$WEBROOT/.well-known/acme-challenge"
+    CONF80=$(grep -lE 'listen\s+80' /etc/nginx/sites-enabled/* 2>/dev/null | head -1)
+    if [[ -n "$CONF80" ]] && ! grep -q 'acme-challenge' "$CONF80"; then
+        # Копия НЕ в sites-enabled: nginx включает оттуда всё подряд, и
+        # .bak стал бы вторым default_server.
+        run cp -a "$CONF80" "/root/$(basename "$CONF80").bak.$(date +%s)"
+        if (( ! DRY_RUN )); then
+            cat > "$CONF80" << EOF
+server {
+    listen 80 default_server;
+    listen [::]:80 default_server;
+    server_name _;
+    location /.well-known/acme-challenge/ { root ${WEBROOT}; }
+    location / { return 301 https://\$host\$request_uri; }
+}
+EOF
+        fi
+        ok ":80: добавлен путь ACME (было 301 на Reality)"; note ":80 отдаёт ACME-путь из webroot"
+    else
+        skip ":80 отдаёт ACME-путь"
+    fi
+    if ! systemctl is-active --quiet nginx && pgrep -x nginx >/dev/null; then
+        # Плагин certbot-nginx поднимал nginx мимо systemd: процесс есть,
+        # «systemctl is-active» говорит inactive, reload из хука бьёт в пустоту.
+        run nginx -s quit; sleep 2
+        run systemctl enable --now nginx
+        ok "nginx возвращён под systemd"; note "nginx под systemd"
+    fi
+    if nginx -t >/dev/null 2>&1; then run systemctl reload nginx; else warn "nginx -t не прошёл — проверь конфиг руками"; fi
+    HOOK=$LE/renewal-hooks/deploy/remnanode.sh
+    if [[ ! -x "$HOOK" ]] || ! grep -q 'grep -q letsencrypt' "$HOOK"; then
+        run mkdir -p "$(dirname "$HOOK")"
+        if (( ! DRY_RUN )); then
+            cat > "$HOOK" << 'EOF'
+#!/bin/bash
+systemctl reload nginx
+if grep -q letsencrypt /opt/remnanode/docker-compose.yml 2>/dev/null; then
+    cd /opt/remnanode && docker compose up -d --force-recreate
+fi
+EOF
+            chmod +x "$HOOK"
+        fi
+        ok "renewal-hook: reload nginx, recreate ноды только при монтировании letsencrypt"
+        note "renewal-hook на месте"
+    else
+        skip "renewal-hook на месте"
+    fi
+    if (( ! DRY_RUN )); then
+        systemctl reset-failed certbot.service 2>/dev/null || true
+        if certbot renew --dry-run -q 2>/tmp/certbot-dry.err; then
+            ok "certbot renew --dry-run: продление работает"
+        else
+            warn "certbot renew --dry-run упал:"; grep -E 'Detail|Failed|rror' /tmp/certbot-dry.err | head -3
+        fi
+    fi
+else
+    skip "letsencrypt на ноде нет"
+fi
+
+# =============================================================================
 title "7 / Права на секреты"
 for f in "${OPT_DIR}/keys.txt" "${OPT_DIR}/.env" "${OPT_DIR}/config-profile.json" \
          /var/log/deploy-remnanode.log; do
@@ -511,7 +605,7 @@ fi
 # =============================================================================
 title "Итог"
 if (( ${#CHANGED[@]} == 0 )); then
-    ok "Изменений не потребовалось — нода уже соответствует v3.11"
+    ok "Изменений не потребовалось — нода уже соответствует v3.12"
 else
     echo -e "${GREEN}  Сделано на этой ноде:${NC}"
     for c in "${CHANGED[@]}"; do echo -e "${GREEN}    • ${c}${NC}"; done

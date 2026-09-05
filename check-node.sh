@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # =============================================================================
-# check-node.sh v3.11 — диагностика развёрнутой ноды routerus.
+# check-node.sh v3.12 — диагностика развёрнутой ноды routerus.
 #
 # READ-ONLY: ничего не меняет, не рестартует и не пишет в конфиги. Задача —
 # пройти флот и увидеть, где что не так, до того как это увидят клиенты.
@@ -292,6 +292,37 @@ if [[ -n "$DOMAIN" && -f "/etc/letsencrypt/live/${DOMAIN}/fullchain.pem" ]]; the
         pass "renewal-hook на месте (пересоздаёт ноду при продлении)"
     else
         warn "нет renewal-hook — после продления нода будет отдавать старый сертификат"
+    fi
+    # Хуки «systemctl stop nginx» из standalone-времён: с webroot они гасят
+    # nginx ровно перед проверкой Let's Encrypt, и продление падает каждый день.
+    if grep -qsE '^(pre-hook|post-hook)\s*=' /etc/letsencrypt/cli.ini \
+        || grep -qsE '^(pre_hook|post_hook)\s*=' /etc/letsencrypt/renewal/*.conf; then
+        fail "в cli.ini или renewal/*.conf есть pre/post-hook, останавливающие nginx — продление будет падать"
+        info "чинится так: sudo bash update-node.sh (секция 6b)"
+    else
+        pass "хуков остановки nginx нет"
+    fi
+    if grep -qsE '^authenticator\s*=\s*webroot' "/etc/letsencrypt/renewal/${DOMAIN}.conf"; then
+        pass "продление через webroot"
+    else
+        warn "продление не через webroot ($(grep -sE '^authenticator' "/etc/letsencrypt/renewal/${DOMAIN}.conf" || echo 'authenticator не задан'))"
+    fi
+    # Путь ACME на :80 должен отдавать файл из webroot (404 на несуществующий),
+    # а не 301 на https, где сидит Reality, и не connection refused.
+    ACME_CODE=$(curl -s -o /dev/null -w '%{http_code}' --max-time 8 \
+        "http://${DOMAIN}/.well-known/acme-challenge/check-node-probe" 2>/dev/null || echo 000)
+    case "$ACME_CODE" in
+        404|200) pass "ACME-путь на :80 отвечает из webroot (${ACME_CODE})" ;;
+        301|302) fail "ACME-путь на :80 редиректит на https (${ACME_CODE}) — Let's Encrypt упрётся в Reality" ;;
+        *)       fail "ACME-путь на :80 не отвечает (${ACME_CODE}) — nginx :80 лежит или закрыт" ;;
+    esac
+    if systemctl is-enabled --quiet certbot.timer 2>/dev/null; then
+        pass "certbot.timer включён"
+    else
+        warn "certbot.timer выключен — автопродления нет"
+    fi
+    if [[ "$(systemctl show certbot.service -p Result --value 2>/dev/null)" == "exit-code" ]]; then
+        fail "последний запуск certbot.service упал — смотри /var/log/letsencrypt/letsencrypt.log"
     fi
 else
     warn "не нашёл сертификат для домена '${DOMAIN:-?}'"
