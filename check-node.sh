@@ -426,7 +426,7 @@ for f in "${OPT_DIR}/keys.txt" "${OPT_DIR}/.env" "${OPT_DIR}/config-profile.json
     fi
 done
 
-if systemctl list-unit-files 2>/dev/null | grep -q 'beszel-agent-update'; then
+if systemctl list-unit-files --no-legend 'beszel-agent-update*' 2>/dev/null | grep -c . >/dev/null; then
     warn "остался таймер самообновления Beszel — снимает update-node.sh (3)"
 fi
 CT_NOW=$(sysctl -n net.netfilter.nf_conntrack_max 2>/dev/null || echo 0)

@@ -342,7 +342,7 @@ fi
 # Установщик оставлял ещё и таймер самообновления агента. Сам агент снят,
 # а таймер раз в сутки ходит за новой версией: на флоте в сентябре 2026
 # он жил на девяти нодах из четырнадцати.
-if systemctl list-unit-files 2>/dev/null | grep -q 'beszel-agent-update'; then
+if systemctl list-unit-files --no-legend 'beszel-agent-update*' 2>/dev/null | grep -c . >/dev/null; then
     run systemctl disable --now beszel-agent-update.timer || true
     run rm -f /etc/systemd/system/beszel-agent-update.service \
                /etc/systemd/system/beszel-agent-update.timer
