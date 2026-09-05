@@ -14,6 +14,10 @@
 # а состояние ноды показывает check-node.sh (оба в этом же репозитории).
 #
 # Changelog v3.13 (сверка флота):
+#   - Reality: явный minClientVer 1.8.0. В Xray 26.x умолчание 26.3.27, и
+#     клиенты со старым ядром (v2RayTun, часть Happ, sing-box роутеров)
+#     молча отбрасывались на рукопожатии: подписку забирают, трафика ноль.
+#     Так 21.08.2026 сломалась группа людей на три недели.
 #   - journald ограничен 200 МБ (на одной ноде журнал вырос до 650 МБ).
 #   - update-node.sh 5b/5c: наследие x-ui в crontab, nf_conntrack в
 #     modules-load (значение из sysctl.d не применялось на старых нодах),
@@ -1406,7 +1410,8 @@ build_inbound() {
           "xver": 1,
           "shortIds": ["","${SID1}","${SID2}","${SID3}"],
           "privateKey": "${PRIVATE_KEY}",
-          "serverNames": ["${DOMAIN}"]
+          "serverNames": ["${DOMAIN}"],
+          "minClientVer": "1.8.0"
         }
       }
     }
