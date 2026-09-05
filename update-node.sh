@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # =============================================================================
-# update-node.sh v3.12 — накатывает правки аудита на УЖЕ развёрнутую ноду.
+# update-node.sh v3.13 — накатывает правки аудита на УЖЕ развёрнутую ноду.
 #
 # Зачем отдельный скрипт: часть находок (BLK-2, BLK-3, H-1, H-4, L-1, L-4)
 # живёт на самой ноде, а не в панели, и не ждёт следующего деплоя. Проходить
@@ -16,6 +16,9 @@
 # образ ноды и docker-compose.yml. Пересоздания контейнера не делает.
 # Продление сертификатов чинит (хуки, webroot, ACME-путь, renewal-hook),
 # но ничего не перевыпускает: срок проверит certbot.timer в своё время.
+# SSH: ssh.socket маскирует всегда (порт не меняется, служба уже enabled),
+# а дроп-ин 00-hardening.conf (root=no, только admin) пишет лишь при
+# SSH_HARDEN=1 — это единственная правка, которой можно запереть себя.
 #
 # ЧЕГО ОН НЕ УМЕЕТ. BLK-1 (приватные сети → BLOCK) и H-2 (sniffing.routeOnly)
 # живут в Config Profile в ПАНЕЛИ, а не на ноде. Их правит человек, скрипт лишь
@@ -336,6 +339,17 @@ if systemctl list-unit-files beszel-agent.service >/dev/null 2>&1 &&
     ok "Beszel agent (служба systemd) удалён"
     BESZEL_FOUND=1
 fi
+# Установщик оставлял ещё и таймер самообновления агента. Сам агент снят,
+# а таймер раз в сутки ходит за новой версией: на флоте в сентябре 2026
+# он жил на девяти нодах из четырнадцати.
+if systemctl list-unit-files 2>/dev/null | grep -q 'beszel-agent-update'; then
+    run systemctl disable --now beszel-agent-update.timer || true
+    run rm -f /etc/systemd/system/beszel-agent-update.service \
+               /etc/systemd/system/beszel-agent-update.timer
+    run systemctl daemon-reload
+    ok "Beszel: снят таймер самообновления агента"
+    BESZEL_FOUND=1
+fi
 if [[ -d /opt/beszel-agent ]]; then
     run rm -rf /opt/beszel-agent
     ok "каталог /opt/beszel-agent убран"
@@ -452,6 +466,122 @@ LREOF
     fi
     ok "logrotate: логи ноды ротируются (4 недели)"
     note "включена ротация логов ноды"
+fi
+
+# =============================================================================
+title "5b / Наследие прошлых эпох: cron, conntrack-модуль, journald"
+# Ноды, пережившие x-ui, несут в crontab «x-ui restart», «certbot renew --nginx»
+# (перебивает webroot из 6b) и sub2sing-box на 127.0.0.1:8080, к которому
+# никто не ходит. Плюс второй watchdog в /usr/local/bin у нод до v3.
+CRON_OLD=$(crontab -l 2>/dev/null || true)
+CRON_NEW=$(grep -vE 'x-ui restart|certbot renew|sub2sing-box|watchdog-remnanode\.sh' <<< "$CRON_OLD" || true)
+if ! grep -q "${OPT_DIR}/watchdog.sh" <<< "$CRON_NEW"; then
+    CRON_NEW="${CRON_NEW}"$'\n'"*/5 * * * * ${OPT_DIR}/watchdog.sh"
+fi
+if [[ "$CRON_NEW" != "$CRON_OLD" ]]; then
+    if (( ! DRY_RUN )); then printf '%s\n' "$CRON_NEW" | grep -v '^$' | crontab -; fi
+    ok "cron: сняты строки x-ui / старого certbot / sub2sing-box, watchdog единый"
+    note "crontab очищен от наследия x-ui"
+else
+    skip "cron без наследия"
+fi
+if pgrep -f sub2sing-box >/dev/null 2>&1; then
+    run pkill -f sub2sing-box || true
+    ok "sub2sing-box остановлен (слушал только 127.0.0.1, никем не использовался)"
+fi
+
+# nf_conntrack_max из sysctl.d не применяется, если модуль грузится позже
+# sysctl: на timeweb-de в файле стояло 262144, а действовало 8192.
+if ! grep -qs nf_conntrack /etc/modules-load.d/remnanode.conf; then
+    if (( ! DRY_RUN )); then echo nf_conntrack > /etc/modules-load.d/remnanode.conf; fi
+    ok "modules-load: nf_conntrack грузится до sysctl"
+    note "nf_conntrack в modules-load.d"
+fi
+if (( ! DRY_RUN )); then
+    modprobe nf_conntrack 2>/dev/null || true
+    sysctl -p /etc/sysctl.d/99-remnanode.conf >/dev/null 2>&1 || true
+fi
+CT_NOW=$(sysctl -n net.netfilter.nf_conntrack_max 2>/dev/null || echo 0)
+CT_CONF=$(awk -F'= *' '/nf_conntrack_max/{print $2}' /etc/sysctl.d/99-remnanode.conf 2>/dev/null | tail -1)
+if [[ -n "$CT_CONF" && "$CT_NOW" != "$CT_CONF" ]]; then
+    warn "nf_conntrack_max действует ${CT_NOW}, в файле ${CT_CONF} — проверь sysctl -p"
+else
+    skip "nf_conntrack_max действует: ${CT_NOW}"
+fi
+
+# journald без потолка съедал 650 МБ на одной ноде.
+if [[ ! -f /etc/systemd/journald.conf.d/remnanode.conf ]]; then
+    if (( ! DRY_RUN )); then
+        mkdir -p /etc/systemd/journald.conf.d
+        printf '[Journal]\nSystemMaxUse=200M\n' > /etc/systemd/journald.conf.d/remnanode.conf
+        systemctl restart systemd-journald 2>/dev/null || true
+        journalctl --vacuum-size=200M >/dev/null 2>&1 || true
+    fi
+    ok "journald: SystemMaxUse=200M"
+    note "журнал systemd ограничен 200 МБ"
+else
+    skip "journald ограничен"
+fi
+
+# =============================================================================
+title "5c / SSH: сокет и хардинг"
+# Сокет-активация игнорирует Port и оживает после apt upgrade openssh-server;
+# deploy маскирует её с v3.7, но ноды старше остались с disabled.
+if systemctl is-enabled --quiet ssh.service 2>/dev/null && systemctl is-active --quiet ssh.service; then
+    if [[ "$(systemctl is-enabled ssh.socket 2>&1)" == masked ]]; then
+        skip "ssh.socket замаскирован"
+    else
+        run systemctl disable --now ssh.socket || true
+        run systemctl mask ssh.socket
+        ok "ssh.socket замаскирован (порт обслуживает ssh.service)"
+        note "ssh.socket masked"
+    fi
+else
+    warn "ssh.service не enabled/active — сокет не трогаю, проверь руками"
+fi
+HARD=/etc/ssh/sshd_config.d/00-hardening.conf
+if [[ "${SSH_HARDEN:-0}" == 1 ]]; then
+    SSH_EFF_PORT=$(sshd -T 2>/dev/null | awk '/^port /{print $2; exit}')
+    if [[ -z "$SSH_EFF_PORT" ]]; then
+        warn "sshd -T не отработал — хардинг пропускаю"
+    elif [[ ! -f "$HARD" ]]; then
+        if (( ! DRY_RUN )); then
+            cat > "$HARD" << EOF
+Port ${SSH_EFF_PORT}
+PermitRootLogin no
+PasswordAuthentication no
+PubkeyAuthentication yes
+AuthorizedKeysFile .ssh/authorized_keys
+MaxAuthTries 3
+ClientAliveInterval 300
+ClientAliveCountMax 2
+X11Forwarding no
+AllowUsers admin
+EOF
+            if sshd -t 2>/dev/null; then
+                systemctl reload ssh
+            else
+                rm -f "$HARD"; warn "sshd -t не прошёл — дроп-ин убран, ничего не изменилось"
+            fi
+        fi
+        ok "sshd: 00-hardening.conf (порт ${SSH_EFF_PORT}, root=no, только admin)"
+        note "SSH-хардинг единым дроп-ином"
+        warn "ПРОВЕРЬ вход из другого терминала, не закрывая этот"
+    elif grep -qE '^PermitRootLogin (yes|prohibit-password|without-password)' "$HARD"; then
+        run cp -a "$HARD" "/root/00-hardening.conf.bak.$(date +%s)"
+        run sed -i -E 's/^PermitRootLogin .*/PermitRootLogin no/' "$HARD"
+        if (( ! DRY_RUN )) && sshd -t 2>/dev/null; then systemctl reload ssh; fi
+        ok "sshd: PermitRootLogin → no"
+        note "root по SSH запрещён"
+    else
+        skip "sshd: хардинг на месте"
+    fi
+else
+    if [[ -f "$HARD" ]]; then
+        skip "sshd: 00-hardening.conf есть (правка root только с SSH_HARDEN=1)"
+    else
+        warn "нет 00-hardening.conf — накатить: SSH_HARDEN=1 bash update-node.sh (запрёт всех, кроме admin)"
+    fi
 fi
 
 # =============================================================================
@@ -605,7 +735,7 @@ fi
 # =============================================================================
 title "Итог"
 if (( ${#CHANGED[@]} == 0 )); then
-    ok "Изменений не потребовалось — нода уже соответствует v3.12"
+    ok "Изменений не потребовалось — нода уже соответствует v3.13"
 else
     echo -e "${GREEN}  Сделано на этой ноде:${NC}"
     for c in "${CHANGED[@]}"; do echo -e "${GREEN}    • ${c}${NC}"; done

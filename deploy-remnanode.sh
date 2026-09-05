@@ -13,6 +13,13 @@
 # Для УЖЕ развёрнутых нод правки этой версии накатывает update-node.sh,
 # а состояние ноды показывает check-node.sh (оба в этом же репозитории).
 #
+# Changelog v3.13 (сверка флота):
+#   - journald ограничен 200 МБ (на одной ноде журнал вырос до 650 МБ).
+#   - update-node.sh 5b/5c: наследие x-ui в crontab, nf_conntrack в
+#     modules-load (значение из sysctl.d не применялось на старых нодах),
+#     таймер самообновления Beszel, маска ssh.socket, хардинг по SSH_HARDEN=1.
+#   - check-node.sh: is-enabled принимал disabled за masked; новые проверки
+#     conntrack, journald, :latest, лишних пользователей и ключей.
 # Changelog v3.12 (продление сертификатов):
 #   - Ноды, поднятые до v3.7, хранили в cli.ini и в renewal/*.conf хуки
 #     «systemctl stop nginx» из времён standalone. С webroot они самоубийственны:
@@ -107,7 +114,7 @@
 set -Eeuo pipefail
 
 # --- Константы (единый источник истины) --------------------------------------
-readonly SCRIPT_VERSION="3.12"
+readonly SCRIPT_VERSION="3.13"
 readonly LOG_FILE="/var/log/deploy-remnanode.log"
 readonly NODE_API_PORT=2222
 readonly NGINX_FALLBACK_PORT=8443
@@ -2016,6 +2023,11 @@ UUEOF
     ok "Автообновления безопасности: дроп-ин 52-remnanode.conf"
 
     # Логи ноды росли без ротации (L-4).
+    mkdir -p /etc/systemd/journald.conf.d
+    printf '[Journal]\nSystemMaxUse=200M\n' > /etc/systemd/journald.conf.d/remnanode.conf
+    systemctl restart systemd-journald 2>/dev/null || true
+    ok "journald: SystemMaxUse=200M"
+
     cat > /etc/logrotate.d/remnanode << 'LREOF'
 /var/log/watchdog.log
 /var/log/deploy-remnanode.log

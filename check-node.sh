@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # =============================================================================
-# check-node.sh v3.12 — диагностика развёрнутой ноды routerus.
+# check-node.sh v3.13 — диагностика развёрнутой ноды routerus.
 #
 # READ-ONLY: ничего не меняет, не рестартует и не пишет в конфиги. Задача —
 # пройти флот и увидеть, где что не так, до того как это увидят клиенты.
@@ -352,6 +352,14 @@ if crontab -l 2>/dev/null | grep -q 'update-geo'; then
 else
     pass "ночного geo-крона нет"
 fi
+# Наследие x-ui: «x-ui restart» без x-ui, «certbot renew --nginx» поверх
+# webroot, sub2sing-box на localhost, второй watchdog в /usr/local/bin.
+CRON_LEGACY=$(crontab -l 2>/dev/null | grep -E 'x-ui restart|certbot renew|sub2sing-box|watchdog-remnanode\.sh' | wc -l)
+if (( CRON_LEGACY > 0 )); then
+    warn "в crontab ${CRON_LEGACY} строк эпохи x-ui / старого certbot — снимает update-node.sh (5b)"
+else
+    pass "crontab без наследия x-ui"
+fi
 
 # --- 7. SSH ------------------------------------------------------------------
 title "7 / SSH"
@@ -375,11 +383,23 @@ if [[ -n "$EFF" ]]; then
 else
     warn "sshd -T не отработал"
 fi
-if systemctl is-enabled ssh.socket >/dev/null 2>&1; then
-    warn "ssh.socket не замаскирован — apt upgrade может вернуть :22"
-else
+# is-enabled возвращает ненулевой код и для disabled, и для masked — раньше
+# «disabled» проходил как «замаскирован», а после apt upgrade сокет оживал.
+if [[ "$(systemctl is-enabled ssh.socket 2>&1)" == masked ]]; then
     pass "ssh.socket замаскирован"
+else
+    warn "ssh.socket $(systemctl is-enabled ssh.socket 2>&1), не masked — apt upgrade может вернуть :22"
 fi
+if [[ -f /etc/ssh/sshd_config.d/00-hardening.conf ]]; then
+    pass "дроп-ин 00-hardening.conf на месте"
+else
+    warn "нет 00-hardening.conf — настройки sshd размазаны по основному конфигу"
+fi
+EXTRA_USERS=$(awk -F: '$3>=1000 && $1!="admin" && $1!="nobody" && $7 ~ /sh$/ {print $1}' /etc/passwd | tr '\n' ' ')
+[[ -n "$EXTRA_USERS" ]] && warn "кроме admin есть пользователи с шеллом: ${EXTRA_USERS}"
+KEYS_N=$(cat /home/admin/.ssh/authorized_keys /root/.ssh/authorized_keys 2>/dev/null | grep -c '^ssh-')
+KEYS_C=$(cat /home/admin/.ssh/authorized_keys /root/.ssh/authorized_keys 2>/dev/null | awk '/^ssh-/{print $3}' | sort -u | tr '\n' ' ')
+info "ключей в authorized_keys: ${KEYS_N} (${KEYS_C:-без подписи})"
 
 # --- 8. Прочее ---------------------------------------------------------------
 title "8 / Прочее"
@@ -406,6 +426,25 @@ for f in "${OPT_DIR}/keys.txt" "${OPT_DIR}/.env" "${OPT_DIR}/config-profile.json
     fi
 done
 
+if systemctl list-unit-files 2>/dev/null | grep -q 'beszel-agent-update'; then
+    warn "остался таймер самообновления Beszel — снимает update-node.sh (3)"
+fi
+CT_NOW=$(sysctl -n net.netfilter.nf_conntrack_max 2>/dev/null || echo 0)
+CT_CONF=$(awk -F'= *' '/nf_conntrack_max/{print $2}' /etc/sysctl.d/99-remnanode.conf 2>/dev/null | tail -1)
+if [[ -n "$CT_CONF" && "$CT_NOW" != "$CT_CONF" ]]; then
+    fail "nf_conntrack_max действует ${CT_NOW}, в sysctl.d записано ${CT_CONF} — модуль грузится после sysctl"
+else
+    pass "nf_conntrack_max: ${CT_NOW}"
+fi
+if [[ -f /etc/systemd/journald.conf.d/remnanode.conf ]]; then
+    pass "journald ограничен ($(journalctl --disk-usage 2>/dev/null | grep -oE '[0-9.]+[MG]' | head -1) занято)"
+else
+    warn "journald без потолка ($(journalctl --disk-usage 2>/dev/null | grep -oE '[0-9.]+[MG]' | head -1) занято)"
+fi
+if grep -qsE 'image:\s*remnawave/node:latest' "${OPT_DIR}/docker-compose.yml"; then
+    warn "образ ноды :latest — README велит пинить версию (REMNANODE_IMAGE)"
+fi
+[[ -f /var/run/reboot-required ]] && info "ядро обновлено, ждёт перезагрузки"
 DISK=$(df -h / | awk 'NR==2{print $5}' | tr -d '%')
 if [[ "$DISK" =~ ^[0-9]+$ ]] && (( DISK >= 90 )); then
     warn "диск заполнен на ${DISK}%"
