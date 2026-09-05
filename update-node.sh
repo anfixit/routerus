@@ -692,7 +692,7 @@ EOF
     fi
     if (( ! DRY_RUN )); then
         systemctl reset-failed certbot.service 2>/dev/null || true
-        if certbot renew --dry-run -q 2>/tmp/certbot-dry.err; then
+        if certbot renew --dry-run -q --no-random-sleep-on-renew 2>/tmp/certbot-dry.err; then
             ok "certbot renew --dry-run: продление работает"
         else
             warn "certbot renew --dry-run упал:"; grep -E 'Detail|Failed|rror' /tmp/certbot-dry.err | head -3
