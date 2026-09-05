@@ -541,7 +541,7 @@ else
 fi
 HARD=/etc/ssh/sshd_config.d/00-hardening.conf
 if [[ "${SSH_HARDEN:-0}" == 1 ]]; then
-    SSH_EFF_PORT=$(sshd -T 2>/dev/null | awk '/^port /{print $2; exit}')
+    SSH_EFF_PORT=$(sshd -T 2>/dev/null | awk '/^port /{p=$2} END{print p}')
     if [[ -z "$SSH_EFF_PORT" ]]; then
         warn "sshd -T не отработал — хардинг пропускаю"
     elif [[ ! -f "$HARD" ]]; then
