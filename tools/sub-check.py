@@ -6,12 +6,22 @@ def get(p, raw=False, base=None):
     d = urllib.request.urlopen(r, timeout=60).read()
     return d if raw else json.loads(d)["response"]
 users = get("/api/users?size=50&start=0")["users"]
-u = next((x for x in users if x.get("tag") == "SVOI" and x["status"] == "ACTIVE"), users[0])
+def pick_links(api_users):
+    """Служебный пользователь с самой полной подпиской: у части своих урезанный сквад."""
+    import base64 as _b
+    best = (None, [])
+    cands = [x for x in api_users if x.get("tag") == "SVOI" and x["status"] == "ACTIVE"][:10] or api_users[:3]
+    for x in cands:
+        try:
+            raw = urllib.request.urlopen(urllib.request.Request(x["subscriptionUrl"], headers={"User-Agent": "v2rayNG/1.9"}), timeout=60).read().decode()
+            try: ls = _b.b64decode(raw + "=" * (-len(raw) % 4)).decode().splitlines()
+            except Exception: ls = raw.splitlines()
+            ls = [l for l in ls if l.startswith("vless://")]
+            if len(ls) > len(best[1]): best = (x, ls)
+        except Exception: pass
+    return best
+u, links = pick_links(users)
 print("пользователь:", u["username"], "tag:", u.get("tag"), "status:", u["status"])
-sub = u["subscriptionUrl"]
-raw = urllib.request.urlopen(urllib.request.Request(sub, headers={"User-Agent": "v2rayNG/1.9"}), timeout=60).read().decode()
-try: links = base64.b64decode(raw + "=" * (-len(raw) % 4)).decode().split("\n")
-except Exception: links = raw.split("\n")
 print("всего ссылок:", len([l for l in links if l.startswith("vless://")]))
 for l in links:
     if NEEDLE in l:

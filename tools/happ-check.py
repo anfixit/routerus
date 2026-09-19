@@ -4,11 +4,15 @@ K, U = sys.argv[1:3]; FILT = sys.argv[3] if len(sys.argv) > 3 else ""
 def api(p):
     r = urllib.request.Request(U + p, headers={"Authorization": "Bearer " + K}); return json.loads(urllib.request.urlopen(r, timeout=60).read())["response"]
 users = api("/api/users?size=50&start=0")["users"]
-u = next((x for x in users if x.get("tag") == "SVOI" and x["status"] == "ACTIVE"), users[0])
-raw = urllib.request.urlopen(urllib.request.Request(u["subscriptionUrl"], headers={"User-Agent": "Happ/5.6.0"}), timeout=60).read().decode()
-try: cfgs = json.loads(raw)
-except Exception: print("не JSON, первые 200 символов:", raw[:200]); sys.exit(1)
-if isinstance(cfgs, dict): cfgs = [cfgs]
+# Служебный пользователь с самой полной подпиской: у части своих урезанный сквад.
+cfgs = []
+for x in ([x for x in users if x.get("tag") == "SVOI" and x["status"] == "ACTIVE"][:10] or users[:3]):
+    try:
+        raw = urllib.request.urlopen(urllib.request.Request(x["subscriptionUrl"], headers={"User-Agent": "Happ/5.6.0"}), timeout=60).read().decode()
+        c = json.loads(raw); c = [c] if isinstance(c, dict) else c
+        if len(c) > len(cfgs): cfgs, u = c, x
+    except Exception: pass
+if not cfgs: print("JSON-подписку получить не удалось"); sys.exit(1)
 print("записей в JSON-подписке:", len(cfgs))
 for c in cfgs:
     name = c.get("remarks") or c.get("name") or "?"

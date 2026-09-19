@@ -5,10 +5,21 @@ K, U, NEEDLE = sys.argv[1:4]
 def api(p):
     r = urllib.request.Request(U + p, headers={"Authorization": "Bearer " + K}); return json.loads(urllib.request.urlopen(r, timeout=60).read())["response"]
 users = api("/api/users?size=50&start=0")["users"]
-u = next((x for x in users if x.get("tag") == "SVOI" and x["status"] == "ACTIVE"), users[0])
-raw = urllib.request.urlopen(urllib.request.Request(u["subscriptionUrl"], headers={"User-Agent": "v2rayNG/1.9"}), timeout=60).read().decode()
-try: links = base64.b64decode(raw + "=" * (-len(raw) % 4)).decode().split("\n")
-except Exception: links = raw.split("\n")
+def pick_links(api_users):
+    """Служебный пользователь с самой полной подпиской: у части своих урезанный сквад."""
+    import base64 as _b
+    best = (None, [])
+    cands = [x for x in api_users if x.get("tag") == "SVOI" and x["status"] == "ACTIVE"][:10] or api_users[:3]
+    for x in cands:
+        try:
+            raw = urllib.request.urlopen(urllib.request.Request(x["subscriptionUrl"], headers={"User-Agent": "v2rayNG/1.9"}), timeout=60).read().decode()
+            try: ls = _b.b64decode(raw + "=" * (-len(raw) % 4)).decode().splitlines()
+            except Exception: ls = raw.splitlines()
+            ls = [l for l in ls if l.startswith("vless://")]
+            if len(ls) > len(best[1]): best = (x, ls)
+        except Exception: pass
+    return best
+u, links = pick_links(users)
 IMG = "ghcr.io/xtls/xray-core:latest"
 for l in links:
     if NEEDLE not in l or not l.startswith("vless://"): continue
