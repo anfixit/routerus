@@ -1607,8 +1607,11 @@ host_block() {
     # Код страны: для имён «хостер-страна» (toolvps-nl, satx-de-1) берём
     # двухбуквенный кусок после дефиса, для старых «DE_natty_narwhal» — префикс.
     local cc
-    cc=$(echo "${NODE_NAME}" | grep -oE -- '-[A-Za-z]{2}(-[0-9]+)?$' | grep -oE '[A-Za-z]{2}' | head -1)
-    [[ -z "$cc" ]] && cc=$(echo "${NODE_NAME}" | grep -oE '^[A-Za-z]{2}')
+    # `|| true` обязателен: под `set -Eeuo pipefail` grep без совпадения роняет
+    # весь скрипт. Путь с именем вида «DE_natty_narwhal» до 23.09.2026 ни разу
+    # не выполнялся — все ноды звались «хостер-страна», и первый grep совпадал.
+    cc=$(echo "${NODE_NAME}" | grep -oE -- '-[A-Za-z]{2}(-[0-9]+)?$' | grep -oE '[A-Za-z]{2}' | head -1 || true)
+    [[ -z "$cc" ]] && cc=$(echo "${NODE_NAME}" | grep -oE '^[A-Za-z]{2}' || true)
     cc=$(echo "$cc" | tr '[:lower:]' '[:upper:]')
     # На флоте значок привязан к транспорту, а не к порту: TCP Reality всегда
     # «лучше с мобильного 🌐» (тег CC_MOB), XHTTP всегда «лучше с Wi-Fi и ПК 🛜»
